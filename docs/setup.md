@@ -103,38 +103,47 @@ Runs 5 unit tests for VelocityCalculator using EF Core InMemory provider.
 
 ## Deployment
 
-### Railway (API Backend)
+### Oracle Cloud VM (API Backend)
 
-1. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
-2. Set **Root Directory** to `/api` in service settings
-3. Railway auto-detects the Dockerfile and builds
-4. Add environment variables:
-
-| Variable | Value |
-|----------|-------|
-| `ConnectionStrings__DefaultConnection` | Your Neon connection string |
-| `Jwt__Key` | A strong 32+ character secret |
-| `Admin__Email` | Your admin email |
-| `Admin__Password` | Your admin password |
-| `Cors__AllowedOrigins__0` | Your Cloudflare Pages URL |
-| `ASPNETCORE_ENVIRONMENT` | `Production` |
+1. Provision an Oracle Cloud VM (free tier eligible — ARM Ampere A1)
+2. Install Docker on the VM
+3. Clone the repo and build:
+   ```bash
+   git clone <repo-url>
+   cd bdo-market-tracker/api
+   docker build -t bdo-api .
+   ```
+4. Run with environment variables:
+   ```bash
+   docker run -d --name bdo-api -p 5000:8080 \
+     -e ConnectionStrings__DefaultConnection="YOUR_NEON_CONNECTION_STRING" \
+     -e Jwt__Key="YOUR_STRONG_SECRET_KEY_32CHARS" \
+     -e Admin__Email="your@email.com" \
+     -e Admin__Password="YourStrongPassword1" \
+     -e Cors__AllowedOrigins__0="https://your-project.pages.dev" \
+     -e ASPNETCORE_ENVIRONMENT=Production \
+     bdo-api
+   ```
+5. Open port 5000 in the VM's security list / firewall
 
 ### Cloudflare Pages (Angular Frontend)
 
 1. Go to [dash.cloudflare.com](https://dash.cloudflare.com) → Workers & Pages → Create → Pages → Connect to Git
 2. Configure build:
    - **Root directory:** `web`
-   - **Build command:** `npm install && npx ng build`
+   - **Build command:** `sed -i "s|apiUrl: ''|apiUrl: '$API_URL'|" src/environments/environment.prod.ts && npm install && npx ng build`
    - **Output directory:** `dist/web/browser`
-3. After deploying, update `web/src/environments/environment.prod.ts` with your Railway API URL
-4. Push to trigger a redeploy
+3. Go to **Settings → Variables and Secrets** → Add a **Secret** named `API_URL` with the value `http://<your-vm-ip>:5000`
+   - Using a Secret (not a plain variable) keeps the server IP out of build logs
+4. Trigger a deploy
 
 ### Post-Deployment Checklist
 
-- [ ] Update `environment.prod.ts` with Railway URL
-- [ ] Set `Cors__AllowedOrigins__0` in Railway to your Cloudflare Pages URL
+- [ ] Set `API_URL` secret in Cloudflare Pages to your Oracle Cloud VM API URL
+- [ ] Set `Cors__AllowedOrigins__0` in Docker env to your Cloudflare Pages URL (e.g., `https://your-project.pages.dev`)
 - [ ] Verify login works at your Cloudflare Pages URL
-- [ ] Confirm market data is syncing (check Railway logs)
+- [ ] Confirm market data is syncing (check Docker logs: `docker logs bdo-api`)
+- [ ] Verify health endpoint: `curl http://<vm-ip>:5000/health`
 
 ## Troubleshooting
 
@@ -158,9 +167,9 @@ The Angular frontend can't reach the .NET backend. Verify:
 - Ensure the Neon project is active (free tier pauses after inactivity)
 
 ### WebSocket connection fails
-This is non-fatal. The service automatically falls back to 30-minute polling with exponential backoff on reconnect attempts. Check logs for:
+This is non-fatal. The service reconnects with exponential backoff (5s → 5min cap) and takes a snapshot during each backoff wait. Check logs for:
 ```
-WebSocket sync failed, falling back to polling
+WebSocket sync failed, retrying in Xs
 ```
 
 ### 401 Unauthorized on API calls

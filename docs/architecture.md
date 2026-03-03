@@ -80,16 +80,18 @@ VelocityCalculator.GetVelocityAsync(itemId)
 
 ### 4. Dashboard Ranking
 ```
-VelocityCalculator.GetDashboardAsync()
+VelocityCalculator.GetDashboardAsync(window)     // window = "3h"|"12h"|"24h"|"3d"|"7d"|"14d"
     │
     ├── Batch query 1: latest snapshot per item (GroupBy + OrderByDescending)
-    ├── Batch query 2: all 24h snapshots for all items
+    ├── Batch query 2: all snapshots within selected window for all items
     ├── Group and calculate in memory:
     │   ├── fulfillmentScore = salesPerHour / totalPreorders
     │   └── estimatedFillTime = totalPreorders / salesPerHour
     │
     └── Return sorted by fulfillmentScore DESC (best items first)
 ```
+
+The frontend provides a time window selector (button toggle group) that re-fetches and re-ranks the dashboard for the chosen window.
 
 ## Backend Architecture
 
@@ -100,16 +102,18 @@ Program.cs registers:
   ├── AppDbContext                        (Scoped)    → IdentityDbContext with Npgsql
   ├── Identity<ApplicationUser, Role>    (Scoped)    → User management, password hashing
   ├── JwtBearer Authentication           (Singleton) → Token validation middleware
-  ├── IArshaApiClient → ArshaApiClient   (Transient) → HttpClient via IHttpClientFactory + Polly
+  ├── IArshaApiClient → ArshaApiClient   (Transient) → HttpClient via IHttpClientFactory + Polly (30s timeout)
   ├── IVelocityCalculator → VelocityCalc (Scoped)    → Depends on AppDbContext
-  └── MarketSyncService                  (Singleton) → IHostedService, depends on IServiceScopeFactory
+  ├── MarketSyncService                  (Singleton) → IHostedService, depends on IServiceScopeFactory
+  ├── RateLimiter                        (Singleton) → Fixed window: 5 req/min per IP on login endpoint
+  └── HealthChecks                       (Singleton) → DB context check at /health
 ```
 
 ### Service Responsibilities
 
 **ArshaApiClient** (`IArshaApiClient`) — Pure HTTP client wrapper. No business logic. Handles:
 - Single vs array response deserialization (arsha.io returns object for 1 item, array for many)
-- Batched item queries (up to 100 IDs per request)
+- Batched item queries (up to 20 IDs per request)
 - 404 handling for order book (returns null) vs other errors (propagates through Polly)
 
 **MarketSyncService** — Background hosted service. Manages:
@@ -126,7 +130,7 @@ Program.cs registers:
 - Human-readable estimated fill times
 - Uses batch queries to avoid N+1 performance issues
 
-**AuthController** — Handles login. Validates credentials via Identity UserManager, issues signed JWTs.
+**AuthController** — Handles login (rate-limited: 5 requests/min per IP). Validates credentials via Identity UserManager, issues signed JWTs.
 
 ### Error Handling & Resilience
 
@@ -149,6 +153,7 @@ AppComponent (toolbar with logout button, router-outlet)
   │   └── Material card: email + password form, error display
   │
   ├── DashboardComponent (lazy-loaded at /, guarded)
+  │   ├── Time window selector (MatButtonToggle: 3h, 12h, 24h, 3d, 7d, 14d)
   │   ├── Summary cards (items tracked, fastest seller, best fill time)
   │   ├── MatTable with MatSort (sortable columns)
   │   └── Score badges (color-coded fulfillment)
@@ -183,9 +188,10 @@ AuthService.login(credentials)
   → HTTP POST /api/auth/login
   → Store JWT → Navigate to /
 
-ApiService.getDashboard()
-  → HTTP GET /api/items/dashboard (with Bearer token via interceptor)
+ApiService.getDashboard(window)
+  → HTTP GET /api/items/dashboard?window=24h (with Bearer token via interceptor)
   → DashboardComponent populates MatTableDataSource
+  → User selects different time window → re-fetches with new window param
   → User clicks row → router navigates to /item/:id
 
 ApiService.getVelocity(id)
@@ -235,7 +241,7 @@ Standard ASP.NET Core Identity tables (AspNetUsers, AspNetRoles, AspNetUserClaim
 | Endpoint | Method | Params | Returns |
 |----------|--------|--------|---------|
 | `/util/db` | GET | `lang=en` | Full item database: `[{id, name, grade}]` |
-| `/v2/{region}/item` | GET | `id` (repeatable, max 100) | `[{name, id, sid, basePrice, currentStock, totalTrades, lastSoldPrice, lastSoldTime}]` |
+| `/v2/{region}/item` | GET | `id` (repeatable, batched in groups of 20) | `[{name, id, sid, basePrice, currentStock, totalTrades, lastSoldPrice, lastSoldTime}]` |
 | `/v2/{region}/orders` | GET | `id`, `sid` | `{name, id, sid, orders: [{price, sellers, buyers}]}` |
 | `/events` | WebSocket | — | Heartbeats every 30s, `ExpiredEvent` on cache invalidation |
 
@@ -243,25 +249,29 @@ Standard ASP.NET Core Identity tables (AspNetUsers, AspNetRoles, AspNetUserClaim
 
 ## Deployment
 
-### Railway (API Backend)
+### Oracle Cloud VM (API Backend)
 - Deploys from `api/Dockerfile` (multi-stage .NET 9 build)
-- Set root directory to `/api` in Railway service settings
-- Environment variables: `ConnectionStrings__DefaultConnection`, `Jwt__Key`, `Admin__Email`, `Admin__Password`, `Cors__AllowedOrigins__0`, `ASPNETCORE_ENVIRONMENT=Production`
+- Docker container running on Oracle Cloud ARM VM (free tier eligible)
+- Environment variables passed via Docker `-e` flags: `ConnectionStrings__DefaultConnection`, `Jwt__Key`, `Admin__Email`, `Admin__Password`, `Cors__AllowedOrigins__0`, `ASPNETCORE_ENVIRONMENT=Production`
 - Always-on service (needed for WebSocket background sync)
+- To update: SSH into VM → `git pull` → `docker build` → `docker run`
 
 ### Cloudflare Pages (Angular Frontend)
 - Root directory: `web`
-- Build command: `npm install && npx ng build`
+- Build command: `sed -i "s|apiUrl: ''|apiUrl: '$API_URL'|" src/environments/environment.prod.ts && npm install && npx ng build`
 - Output directory: `dist/web/browser`
-- Update `environment.prod.ts` with Railway URL after first deploy
+- `API_URL` stored as a **Secret** in Cloudflare Pages Variables & Secrets (keeps server IP out of repo and build logs)
 
 ## Security Considerations
 
-- **Secrets management:** Connection strings, JWT keys, and admin credentials are in gitignored `appsettings.Development.json` (local) and Railway env vars (production). `appsettings.json` contains only placeholders.
+- **Secrets management:** Connection strings, JWT keys, and admin credentials are in gitignored `appsettings.Development.json` (local) and Docker env vars (production). `appsettings.json` contains only placeholders. API URL injected at build time via Cloudflare Pages Secret.
 - **Authentication:** All data endpoints require JWT Bearer token. No public registration — invite-only admin.
+- **Rate limiting:** Login endpoint limited to 5 requests/min per IP (ASP.NET Core FixedWindowRateLimiter). Returns 429 Too Many Requests.
 - **Password hashing:** Handled by ASP.NET Core Identity (PBKDF2 with HMAC-SHA256).
-- **CORS:** Config-driven from `Cors:AllowedOrigins` — restricts cross-origin access to specific domains.
-- **HTTP resilience:** Polly retries with exponential backoff prevent cascading failures from arsha.io outages.
+- **CORS:** Config-driven from `Cors:AllowedOrigins` — restricts cross-origin access to specific domains, methods (GET, POST, OPTIONS), and headers (Authorization, Content-Type).
+- **HTTPS:** Enforced in production via `UseHttpsRedirection()` middleware.
+- **HTTP client:** 30-second timeout on all arsha.io requests. Polly retries with exponential backoff prevent cascading failures.
+- **Health check:** `/health` endpoint with DB connectivity check (unauthenticated).
 - **arsha.io:** Public API, no API keys required.
 
 ## Testing

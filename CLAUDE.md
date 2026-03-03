@@ -23,7 +23,7 @@ A web app that tracks sales velocity of Black Desert Online (BDO) Central Market
 - **Frontend:** Angular 18 (standalone components), Angular Material, Chart.js/ng2-charts
 - **Database:** Neon (serverless PostgreSQL)
 - **External API:** arsha.io v2 (30-minute cache TTL)
-- **Deployment:** Railway (API) + Cloudflare Pages (SPA)
+- **Deployment:** Oracle Cloud VM (Docker) + Cloudflare Pages (SPA)
 
 ## Project Structure
 
@@ -50,8 +50,9 @@ bdo-market-tracker/
 │   │   ├── IVelocityCalculator.cs # Interface for velocity calculator
 │   │   ├── VelocityCalculator.cs # Batch-optimized sales velocity & fulfillment calculations
 │   │   └── MarketSyncService.cs  # Background service: WebSocket + polling with exponential backoff
-│   ├── Program.cs                # DI, Identity, JWT, CORS, Polly, auto-migrate, admin seed
-│   ├── Dockerfile                # Multi-stage .NET 9 build for Railway
+│   ├── Program.cs                # DI, Identity, JWT, CORS, Polly, rate limiting, health checks, auto-migrate, admin seed
+│   ├── Dockerfile                # Multi-stage .NET 9 build for Oracle Cloud VM
+│   ├── .dockerignore               # Docker build exclusions
 │   ├── appsettings.json          # Base config (placeholders for secrets)
 │   ├── appsettings.Development.json  # Dev secrets (gitignored)
 │   └── appsettings.Production.json   # Prod overrides (gitignored)
@@ -125,10 +126,11 @@ On startup, `MarketSyncService` fetches the full item database from `/util/db?la
 ### API Endpoints
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/api/auth/login` | No | Authenticate and receive JWT |
+| POST | `/api/auth/login` | No | Authenticate and receive JWT (rate-limited: 5/min per IP) |
 | GET | `/api/items` | Yes | All tracked items with latest snapshot |
 | GET | `/api/items/{id}/velocity` | Yes | Velocity across all time windows |
-| GET | `/api/items/dashboard` | Yes | All items ranked by fulfillment score |
+| GET | `/api/items/dashboard?window=24h` | Yes | All items ranked by fulfillment score for given window |
+| GET | `/health` | No | Health check (includes DB connectivity) |
 
 ### arsha.io Endpoints Used
 | Endpoint | Purpose |
@@ -171,11 +173,11 @@ Configuration uses ASP.NET Core's layered approach: `appsettings.json` (base/pla
 }
 ```
 
-**Real secrets** go in `appsettings.Development.json` (local) or Railway env vars (production). Never commit secrets to `appsettings.json`.
+**Real secrets** go in `appsettings.Development.json` (local) or Docker environment variables (production). Never commit secrets to `appsettings.json`.
 
 **Angular environments** in `web/src/environments/`:
 - `environment.ts` — dev: API at `http://localhost:5000`
-- `environment.prod.ts` — prod: Railway API URL
+- `environment.prod.ts` — prod: API URL injected at build time via Cloudflare Pages env var (`API_URL` secret + `sed` in build command)
 
 ## Database Schema
 
@@ -186,9 +188,13 @@ Configuration uses ASP.NET Core's layered approach: `appsettings.json` (base/pla
 
 ## Deployment
 
-- **API:** Railway (Docker container from `api/Dockerfile`). Set root directory to `/api`.
-- **Frontend:** Cloudflare Pages. Root directory `web`, build command `npm install && npx ng build`, output `dist/web/browser`.
-- **Env vars for Railway:** `ConnectionStrings__DefaultConnection`, `Jwt__Key`, `Admin__Email`, `Admin__Password`, `Cors__AllowedOrigins__0`
+- **API:** Oracle Cloud VM running Docker container from `api/Dockerfile`.
+  - SSH into VM, `git pull`, rebuild with `docker build -t bdo-api ./api && docker run -d ...`
+  - Pass config via Docker environment variables (`-e` flags or `.env` file)
+- **Frontend:** Cloudflare Pages. Root directory `web`, output `dist/web/browser`.
+  - Build command: `sed -i "s|apiUrl: ''|apiUrl: '$API_URL'|" src/environments/environment.prod.ts && npm install && npx ng build`
+  - `API_URL` is set as a **Secret** in Cloudflare Pages Variables & Secrets (keeps the server IP out of the repo)
+- **API env vars (Docker):** `ConnectionStrings__DefaultConnection`, `Jwt__Key`, `Admin__Email`, `Admin__Password`, `Cors__AllowedOrigins__0`, `ASPNETCORE_ENVIRONMENT=Production`
 
 ## Common Tasks
 
@@ -205,7 +211,7 @@ Edit `VelocityCalculator.WindowDefinitions` dictionary — add entry like `["30d
 Add method to `ItemsController` (with `[Authorize]`), create DTO in `Dtos/` if needed.
 
 ### Change admin credentials
-Update `Admin:Email` and `Admin:Password` in `appsettings.Development.json` (local) or Railway env vars (production). The seed runs on every startup and creates the user only if it doesn't exist — to change the password of an existing user, update it directly in the database.
+Update `Admin:Email` and `Admin:Password` in `appsettings.Development.json` (local) or Docker env vars (production). The seed runs on every startup and creates the user only if it doesn't exist — to change the password of an existing user, update it directly in the database.
 
 ### Run EF Core migrations
 ```bash

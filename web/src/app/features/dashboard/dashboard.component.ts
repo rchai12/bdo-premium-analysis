@@ -49,7 +49,11 @@ export class DashboardComponent implements OnInit {
   timeWindows = ['3h', '12h', '24h', '3d', '7d', '14d'];
   selectedWindow = '24h';
 
-  @ViewChild(MatSort) sort!: MatSort;
+  @ViewChild(MatSort) set matSort(sort: MatSort) {
+    if (sort) {
+      this.dataSource.sort = sort;
+    }
+  }
 
   constructor(
     private api: ApiService,
@@ -71,7 +75,6 @@ export class DashboardComponent implements OnInit {
     this.api.getDashboard(this.selectedWindow).subscribe({
       next: (items) => {
         this.dataSource.data = items;
-        this.dataSource.sort = this.sort;
         this.totalItems = items.length;
 
         if (items.length > 0) {

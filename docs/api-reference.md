@@ -19,7 +19,7 @@ Base URL: `http://localhost:5000`
 
 ### POST /api/auth/login
 
-Authenticate with email and password to receive a JWT.
+Authenticate with email and password to receive a JWT. **Rate limited:** 5 requests per minute per IP address.
 
 **Request body:**
 ```json
@@ -48,6 +48,7 @@ Authenticate with email and password to receive a JWT.
 - `expiresIn` is in seconds (default 86400 = 24 hours)
 - Token contains `sub` (user ID), `email`, and `jti` (unique token ID) claims
 - No public registration endpoint — admin account is seeded on startup from config
+- Returns `429 Too Many Requests` if rate limit is exceeded
 
 ---
 
@@ -144,6 +145,14 @@ Returns sales velocity metrics across all time windows for a specific item. **Re
 
 Returns all tracked items ranked by fulfillment score (best first). **Requires authentication.**
 
+**Query Parameters:**
+
+| Param | Type | Default | Description |
+|-------|------|---------|-------------|
+| `window` | string | `24h` | Time window for velocity calculation. Valid: `3h`, `12h`, `24h`, `3d`, `7d`, `14d` |
+
+**Example:** `GET /api/items/dashboard?window=7d`
+
 **Response:** `200 OK`
 ```json
 [
@@ -154,11 +163,19 @@ Returns all tracked items ranked by fulfillment score (best first). **Requires a
     "basePrice": 349000000,
     "currentStock": 0,
     "totalPreorders": 85,
-    "salesPerHour24h": 1.42,
+    "salesPerHour": 1.42,
+    "window": "24h",
     "fulfillmentScore": 0.0167,
     "estimatedFillTime": "~2.5 days"
   }
 ]
+```
+
+**Response:** `400 Bad Request` (invalid window value)
+```json
+{
+  "message": "Invalid window 'foo'. Valid values: 3h, 12h, 24h, 3d, 7d, 14d"
+}
 ```
 
 **Field Definitions:**
@@ -171,7 +188,8 @@ Returns all tracked items ranked by fulfillment score (best first). **Requires a
 | basePrice | long | Current market price in silver |
 | currentStock | long | Units listed for sale right now |
 | totalPreorders | long | Number of competing buyer orders |
-| salesPerHour24h | double | Average sales per hour over last 24 hours |
+| salesPerHour | double | Average sales per hour over the selected time window |
+| window | string | The time window used for this calculation |
 | fulfillmentScore | double | `salesPerHour / totalPreorders` — higher is better |
 | estimatedFillTime | string | Human-readable estimate: "~X.X hrs", "~X.X days", or "N/A" |
 
@@ -179,12 +197,24 @@ Returns all tracked items ranked by fulfillment score (best first). **Requires a
 
 ---
 
+### GET /health
+
+Health check endpoint. **No authentication required.**
+
+**Response:** `200 OK` — `Healthy` (includes database connectivity check)
+
+**Response:** `503 Service Unavailable` — `Unhealthy`
+
+---
+
 ## Error Responses
 
 | Status | Meaning |
 |--------|---------|
+| 400 Bad Request | Invalid query parameter (e.g., invalid window value) |
 | 401 Unauthorized | Missing or invalid JWT token |
 | 404 Not Found | Item ID not tracked |
+| 429 Too Many Requests | Rate limit exceeded (login endpoint) |
 | 500 Internal Server Error | Unexpected server error |
 
 ---
@@ -231,7 +261,7 @@ GET https://api.arsha.io/v2/na/item?id=15363&lang=en
 }
 ```
 
-Supports up to 100 IDs: `?id=15363&id=15364&id=15365`
+Supports multiple IDs (batched in groups of 20): `?id=15363&id=15364&id=15365`
 
 ### GET /v2/{region}/orders
 
