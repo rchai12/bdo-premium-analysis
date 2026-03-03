@@ -96,37 +96,43 @@ Returns sales velocity metrics across all time windows for a specific item. **Re
       "window": "3h",
       "salesCount": 5,
       "salesPerHour": 1.67,
-      "avgPreorders": 85
+      "avgPreorders": 85,
+      "confidence": "low"
     },
     {
       "window": "12h",
       "salesCount": 18,
       "salesPerHour": 1.50,
-      "avgPreorders": 82
+      "avgPreorders": 82,
+      "confidence": "medium"
     },
     {
       "window": "24h",
       "salesCount": 34,
       "salesPerHour": 1.42,
-      "avgPreorders": 80
+      "avgPreorders": 80,
+      "confidence": "medium"
     },
     {
       "window": "3d",
       "salesCount": 95,
       "salesPerHour": 1.32,
-      "avgPreorders": 78
+      "avgPreorders": 78,
+      "confidence": "high"
     },
     {
       "window": "7d",
       "salesCount": 210,
       "salesPerHour": 1.25,
-      "avgPreorders": 75
+      "avgPreorders": 75,
+      "confidence": "high"
     },
     {
       "window": "14d",
       "salesCount": 400,
       "salesPerHour": 1.19,
-      "avgPreorders": 72
+      "avgPreorders": 72,
+      "confidence": "high"
     }
   ]
 }
@@ -135,8 +141,10 @@ Returns sales velocity metrics across all time windows for a specific item. **Re
 **Response:** `404 Not Found` if item ID is not tracked.
 
 **Notes:**
-- `salesCount` and `salesPerHour` will be 0 if fewer than 2 snapshots exist in the window.
+- `salesPerHour` is computed using a **weighted median** of consecutive segment rates with exponential recency decay (half-life = half the window duration). This is robust to single-sale spikes and favors recent activity.
+- `salesCount` is the raw total (latest - earliest `totalTrades`) and will be 0 if fewer than 2 snapshots exist in the window.
 - `avgPreorders` is averaged across all snapshots in the window.
+- `confidence` indicates data quality: `"low"` (<3 segments or <3 sales), `"medium"` (3–10 segments), `"high"` (>10 segments and ≥10 sales).
 - Internally uses a single query to fetch all 14-day snapshots, then slices per window in memory.
 
 ---
@@ -166,7 +174,8 @@ Returns all tracked items ranked by fulfillment score (best first). **Requires a
     "salesPerHour": 1.42,
     "window": "24h",
     "fulfillmentScore": 0.0167,
-    "estimatedFillTime": "~2.5 days"
+    "estimatedFillTime": "~2.5 days",
+    "confidence": "medium"
   }
 ]
 ```
@@ -188,10 +197,11 @@ Returns all tracked items ranked by fulfillment score (best first). **Requires a
 | basePrice | long | Current market price in silver |
 | currentStock | long | Units listed for sale right now |
 | totalPreorders | long | Number of competing buyer orders |
-| salesPerHour | double | Average sales per hour over the selected time window |
+| salesPerHour | double | Weighted median sales per hour (recency-weighted, spike-resistant) |
 | window | string | The time window used for this calculation |
 | fulfillmentScore | double | `salesPerHour / totalPreorders` — higher is better |
 | estimatedFillTime | string | Human-readable estimate: "~X.X hrs", "~X.X days", or "N/A" |
+| confidence | string | Data quality: `"low"`, `"medium"`, or `"high"` |
 
 **Sorting:** Results are pre-sorted by `fulfillmentScore` descending.
 

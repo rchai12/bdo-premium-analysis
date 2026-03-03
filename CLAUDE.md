@@ -117,8 +117,12 @@ arsha.io caches BDO market data for **30 minutes**. The backend syncs in lockste
 On startup, `MarketSyncService` fetches the full item database from `/util/db?lang=en` and filters for items containing both "Premium" AND "Set" (case-insensitive). These are upserted into `tracked_items`.
 
 ### Velocity Calculation
-- **Sales velocity** = `(latest_total_trades - earliest_total_trades) / hours_elapsed` for a given time window
+- **Sales velocity** uses a **weighted median** of consecutive snapshot segment rates, not a simple average
+  - Consecutive snapshot pairs where `totalTrades` increased form "segments"
+  - Each segment gets an **exponential decay weight** (half-life = half the window duration) — recent sales matter more
+  - The **weighted median** of segment rates becomes `salesPerHour` — robust to single-sale spikes
 - **Time windows:** 3h, 12h, 24h, 3d, 7d, 14d
+- **Confidence indicator:** "low" (<3 segments or <3 sales), "medium" (3–10 segments), "high" (>10 segments and ≥10 sales)
 - **Fulfillment score** = `sales_per_hour / total_preorders` (higher = faster fill)
 - **Estimated fill time** = `total_preorders / sales_per_hour`
 - **Query optimization:** Batch queries (3 total for dashboard, 2 for velocity) instead of N+1 per item

@@ -4,16 +4,17 @@ A web app that tracks sales velocity of Black Desert Online Central Market premi
 
 ## How It Works
 
-The backend continuously collects market snapshots from [arsha.io](https://api.arsha.io) (every ~30 minutes via WebSocket events) and stores them in a PostgreSQL database. When you open the dashboard, it calculates sales velocity and fulfillment scores across configurable time windows (3h to 14d) to show which costumes are selling fastest relative to their preorder queue.
+The backend continuously collects market snapshots from [arsha.io](https://api.arsha.io) (every ~30 minutes via WebSocket events) and stores them in a PostgreSQL database. When you open the dashboard, it calculates sales velocity using a **weighted median** algorithm with **recency weighting** across configurable time windows (3h to 14d) to show which costumes are selling fastest relative to their preorder queue.
 
-**Key metric: Fulfillment Score** = `sales_per_hour / total_preorders` — higher means your preorder fills faster.
+**Key metric: Fulfillment Score** = `sales_per_hour / total_preorders` — higher means your preorder fills faster. Each metric includes a **confidence indicator** (low/medium/high) so you know when the data is trustworthy.
 
 ## Screenshots
 
 The dashboard displays a sortable table of all premium costume sets with:
-- Sales per hour for the selected time window
+- Sales per hour for the selected time window (weighted median, favoring recent data)
 - Estimated fill time (how long until your preorder would be fulfilled)
 - Fulfillment score (color-coded: green = fast, yellow = moderate, red = slow)
+- Confidence indicator (color-coded: green = high, yellow = medium, red = low)
 - Time window selector to compare short-term vs long-term trends
 
 ## Tech Stack

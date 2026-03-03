@@ -72,10 +72,14 @@ VelocityCalculator.GetVelocityAsync(itemId)
     ├── Single query: all snapshots within 14d window (largest window)
     ├── Slice in memory per window [3h, 12h, 24h, 3d, 7d, 14d]:
     │   ├── salesCount = latest.totalTrades - earliest.totalTrades
-    │   ├── salesPerHour = salesCount / hours_elapsed
-    │   └── avgPreorders = average of snapshot preorder counts
+    │   ├── AnalyzeSegments: iterate consecutive pairs where trades increased
+    │   │   ├── Compute per-segment rate (salesDelta / hours)
+    │   │   └── Apply exponential decay weight (half-life = half window duration)
+    │   ├── salesPerHour = WeightedMedian(segments)  — robust to spikes, favors recent data
+    │   ├── avgPreorders = average of snapshot preorder counts
+    │   └── confidence = GetConfidence(segmentCount, totalSalesCount)
     │
-    └── Return VelocityDto with all windows
+    └── Return VelocityDto with all windows + confidence per window
 ```
 
 ### 4. Dashboard Ranking
@@ -85,8 +89,10 @@ VelocityCalculator.GetDashboardAsync(window)     // window = "3h"|"12h"|"24h"|"3
     ├── Batch query 1: latest snapshot per item (GroupBy + OrderByDescending)
     ├── Batch query 2: all snapshots within selected window for all items
     ├── Group and calculate in memory:
+    │   ├── salesPerHour via weighted median of segments (same algorithm as velocity)
     │   ├── fulfillmentScore = salesPerHour / totalPreorders
-    │   └── estimatedFillTime = totalPreorders / salesPerHour
+    │   ├── estimatedFillTime = totalPreorders / salesPerHour
+    │   └── confidence = low | medium | high
     │
     └── Return sorted by fulfillmentScore DESC (best items first)
 ```
@@ -125,7 +131,8 @@ Program.cs registers:
 - Region is configurable via `Arsha:Region` config
 
 **VelocityCalculator** (`IVelocityCalculator`) — Stateless query service. Computes:
-- Sales velocity across configurable time windows
+- Sales velocity via **weighted median** of consecutive segment rates with **exponential recency decay**
+- **Confidence indicators** (low/medium/high) based on segment count and total sales
 - Fulfillment scores (sales rate vs competition)
 - Human-readable estimated fill times
 - Uses batch queries to avoid N+1 performance issues
