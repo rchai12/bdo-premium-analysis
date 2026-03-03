@@ -1,0 +1,27 @@
+# .NET
+api/bin/
+api/obj/
+api.Tests/bin/
+api.Tests/obj/
+
+# Environment-specific config (may contain secrets)
+api/appsettings.Development.json
+api/appsettings.Production.json
+
+# User secrets
+api/secrets.json
+
+# Angular (covered by web/.gitignore, but just in case)
+web/node_modules/
+web/dist/
+web/.angular/
+
+# IDE and local tools
+.vs/
+.claude/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db

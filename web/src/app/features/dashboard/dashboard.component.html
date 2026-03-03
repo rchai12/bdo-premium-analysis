@@ -1,0 +1,117 @@
+<div class="dashboard-container">
+  <!-- Summary Cards -->
+  <div class="summary-cards">
+    <mat-card>
+      <mat-card-content>
+        <div class="stat-label">Items Tracked</div>
+        <div class="stat-value">{{ totalItems }}</div>
+      </mat-card-content>
+    </mat-card>
+    <mat-card>
+      <mat-card-content>
+        <div class="stat-label">Fastest Seller</div>
+        <div class="stat-value stat-name">{{ fastestSeller || '—' }}</div>
+      </mat-card-content>
+    </mat-card>
+    <mat-card>
+      <mat-card-content>
+        <div class="stat-label">Best Est. Fill</div>
+        <div class="stat-value">{{ bestFillTime || '—' }}</div>
+      </mat-card-content>
+    </mat-card>
+  </div>
+
+  <!-- Time Window Selector -->
+  <div class="window-selector">
+    <span class="window-label">Time Window:</span>
+    <mat-button-toggle-group [value]="selectedWindow" (change)="onWindowChange($event.value)">
+      @for (w of timeWindows; track w) {
+        <mat-button-toggle [value]="w">{{ w }}</mat-button-toggle>
+      }
+    </mat-button-toggle-group>
+  </div>
+
+  <!-- Loading State -->
+  @if (loading) {
+    <div class="loading-container">
+      <mat-spinner diameter="48"></mat-spinner>
+      <p>Loading market data...</p>
+    </div>
+  }
+
+  <!-- Error State -->
+  @if (error) {
+    <div class="error-container">
+      <mat-icon>error_outline</mat-icon>
+      <p>{{ error }}</p>
+    </div>
+  }
+
+  <!-- Data Table -->
+  @if (!loading && !error) {
+    <mat-card class="table-card">
+      <table mat-table [dataSource]="dataSource" matSort class="market-table">
+        <!-- Name Column -->
+        <ng-container matColumnDef="name">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>Item Name</th>
+          <td mat-cell *matCellDef="let item">{{ item.name }}</td>
+        </ng-container>
+
+        <!-- Price Column -->
+        <ng-container matColumnDef="basePrice">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>Price</th>
+          <td mat-cell *matCellDef="let item">{{ formatPrice(item.basePrice) }}</td>
+        </ng-container>
+
+        <!-- Stock Column -->
+        <ng-container matColumnDef="currentStock">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>Stock</th>
+          <td mat-cell *matCellDef="let item">{{ item.currentStock | number }}</td>
+        </ng-container>
+
+        <!-- Preorders Column -->
+        <ng-container matColumnDef="totalPreorders">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>Preorders</th>
+          <td mat-cell *matCellDef="let item">{{ item.totalPreorders | number }}</td>
+        </ng-container>
+
+        <!-- Sales/Hr Column -->
+        <ng-container matColumnDef="salesPerHour">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>Sales/Hr ({{ selectedWindow }})</th>
+          <td mat-cell *matCellDef="let item">{{ item.salesPerHour | number:'1.1-2' }}</td>
+        </ng-container>
+
+        <!-- Est. Fill Time Column -->
+        <ng-container matColumnDef="estimatedFillTime">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>Est. Fill Time</th>
+          <td mat-cell *matCellDef="let item">{{ item.estimatedFillTime }}</td>
+        </ng-container>
+
+        <!-- Fulfillment Score Column -->
+        <ng-container matColumnDef="fulfillmentScore">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>Score</th>
+          <td mat-cell *matCellDef="let item">
+            <span class="score-badge" [ngClass]="getFulfillmentColor(item.fulfillmentScore)">
+              {{ item.fulfillmentScore | number:'1.3-4' }}
+            </span>
+          </td>
+        </ng-container>
+
+        <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
+        <tr
+          mat-row
+          *matRowDef="let row; columns: displayedColumns"
+          (click)="onRowClick(row)"
+          class="clickable-row"
+        ></tr>
+      </table>
+
+      @if (dataSource.data.length === 0) {
+        <div class="empty-state">
+          <mat-icon>hourglass_empty</mat-icon>
+          <p>No data yet. The background service is collecting snapshots — check back in ~30 minutes.</p>
+        </div>
+      }
+    </mat-card>
+  }
+</div>

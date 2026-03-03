@@ -1,0 +1,6 @@
+@BdoMarketTracker_HostAddress = http://localhost:5163
+
+GET {{BdoMarketTracker_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

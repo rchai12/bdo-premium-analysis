@@ -1,0 +1,90 @@
+<div class="detail-container">
+  <a mat-button routerLink="/" class="back-link">
+    <mat-icon>arrow_back</mat-icon>
+    Back to Dashboard
+  </a>
+
+  @if (loading) {
+    <div class="loading-container">
+      <mat-spinner diameter="48"></mat-spinner>
+      <p>Loading item data...</p>
+    </div>
+  }
+
+  @if (error) {
+    <div class="error-container">
+      <mat-icon>error_outline</mat-icon>
+      <p>{{ error }}</p>
+    </div>
+  }
+
+  @if (!loading && !error && velocity) {
+    <h2>{{ velocity.name }}</h2>
+
+    <!-- Velocity by Time Window -->
+    <div class="charts-grid">
+      <mat-card>
+        <mat-card-header>
+          <mat-card-title>Sales Velocity by Window</mat-card-title>
+          <mat-card-subtitle>Sales per hour across different time windows</mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <div class="chart-wrapper">
+            <canvas
+              baseChart
+              type="bar"
+              [data]="velocityChartData"
+              [options]="velocityChartOptions"
+            ></canvas>
+          </div>
+        </mat-card-content>
+      </mat-card>
+
+      <mat-card>
+        <mat-card-header>
+          <mat-card-title>Avg Preorders by Window</mat-card-title>
+          <mat-card-subtitle>Average number of competing preorders</mat-card-subtitle>
+        </mat-card-header>
+        <mat-card-content>
+          <div class="chart-wrapper">
+            <canvas
+              baseChart
+              type="bar"
+              [data]="preorderChartData"
+              [options]="preorderChartOptions"
+            ></canvas>
+          </div>
+        </mat-card-content>
+      </mat-card>
+    </div>
+
+    <!-- Raw Data Table -->
+    <mat-card class="data-card">
+      <mat-card-header>
+        <mat-card-title>Detailed Breakdown</mat-card-title>
+      </mat-card-header>
+      <mat-card-content>
+        <table class="detail-table">
+          <thead>
+            <tr>
+              <th>Window</th>
+              <th>Sales Count</th>
+              <th>Sales/Hr</th>
+              <th>Avg Preorders</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (w of velocity.windows; track w.window) {
+              <tr>
+                <td>{{ w.window }}</td>
+                <td>{{ w.salesCount | number }}</td>
+                <td>{{ w.salesPerHour | number:'1.1-2' }}</td>
+                <td>{{ w.avgPreorders | number:'1.0-0' }}</td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </mat-card-content>
+    </mat-card>
+  }
+</div>
