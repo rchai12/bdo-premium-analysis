@@ -36,6 +36,7 @@ export class DashboardComponent implements OnInit {
     'salesPerHour',
     'estimatedFillTime',
     'fulfillmentScore',
+    'confidence',
   ];
 
   dataSource = new MatTableDataSource<DashboardItem>([]);
@@ -117,5 +118,21 @@ export class DashboardComponent implements OnInit {
     if (score >= 0.05) return 'good';
     if (score >= 0.01) return 'moderate';
     return 'slow';
+  }
+
+  getConfidenceIcon(confidence: string): string {
+    switch (confidence) {
+      case 'high': return 'verified';
+      case 'medium': return 'help_outline';
+      default: return 'warning';
+    }
+  }
+
+  getConfidenceColor(confidence: string): string {
+    switch (confidence) {
+      case 'high': return 'confidence-high';
+      case 'medium': return 'confidence-medium';
+      default: return 'confidence-low';
+    }
   }
 }

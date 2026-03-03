@@ -12,4 +12,5 @@ public class DashboardItemDto
     public string Window { get; set; } = "24h";
     public double FulfillmentScore { get; set; }
     public string EstimatedFillTime { get; set; } = string.Empty;
+    public string Confidence { get; set; } = "low";
 }

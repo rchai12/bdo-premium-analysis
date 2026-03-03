@@ -13,4 +13,5 @@ public class VelocityWindowDto
     public long SalesCount { get; set; }
     public double SalesPerHour { get; set; }
     public double AvgPreorders { get; set; }
+    public string Confidence { get; set; } = "low";
 }

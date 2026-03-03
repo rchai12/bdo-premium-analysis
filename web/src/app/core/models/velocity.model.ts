@@ -9,4 +9,5 @@ export interface VelocityWindow {
   salesCount: number;
   salesPerHour: number;
   avgPreorders: number;
+  confidence: string;
 }

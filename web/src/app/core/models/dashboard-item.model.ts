@@ -9,4 +9,5 @@ export interface DashboardItem {
   window: string;
   fulfillmentScore: number;
   estimatedFillTime: string;
+  confidence: string;
 }

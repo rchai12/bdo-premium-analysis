@@ -95,6 +95,38 @@
   }
 }
 
+.confidence-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: capitalize;
+
+  &.confidence-high {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+  }
+
+  &.confidence-medium {
+    background-color: #fff8e1;
+    color: #f57f17;
+  }
+
+  &.confidence-low {
+    background-color: #fce4ec;
+    color: #c62828;
+  }
+}
+
+.confidence-icon {
+  font-size: 14px;
+  width: 14px;
+  height: 14px;
+}
+
 .empty-state {
   display: flex;
   flex-direction: column;

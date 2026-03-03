@@ -1,5 +1,6 @@
 using BdoMarketTracker.Data;
 using BdoMarketTracker.Dtos;
+using BdoMarketTracker.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace BdoMarketTracker.Services;
@@ -46,24 +47,26 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
                     Window = windowName,
                     SalesCount = 0,
                     SalesPerHour = 0,
-                    AvgPreorders = snapshots.FirstOrDefault()?.TotalPreorders ?? 0
+                    AvgPreorders = snapshots.FirstOrDefault()?.TotalPreorders ?? 0,
+                    Confidence = "low"
                 });
                 continue;
             }
 
-            var earliest = snapshots.First();
-            var latest = snapshots.Last();
-            var salesCount = latest.TotalTrades - earliest.TotalTrades;
-            var hours = (latest.RecordedAt - earliest.RecordedAt).TotalHours;
-            var salesPerHour = hours > 0 ? salesCount / hours : 0;
+            var halfLifeHours = duration.TotalHours / 2;
+            var (segments, totalSalesCount) = AnalyzeSegments(snapshots, now, halfLifeHours);
+
+            var salesPerHour = WeightedMedian(segments);
             var avgPreorders = snapshots.Average(s => (double)s.TotalPreorders);
+            var salesCount = snapshots.Last().TotalTrades - snapshots.First().TotalTrades;
 
             dto.Windows.Add(new VelocityWindowDto
             {
                 Window = windowName,
                 SalesCount = salesCount,
                 SalesPerHour = Math.Round(salesPerHour, 2),
-                AvgPreorders = Math.Round(avgPreorders, 0)
+                AvgPreorders = Math.Round(avgPreorders, 0),
+                Confidence = GetConfidence(segments.Count, totalSalesCount)
             });
         }
 
@@ -98,6 +101,7 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
             .GroupBy(s => s.ItemId)
             .ToDictionary(g => g.Key, g => g.ToList());
 
+        var halfLifeHours = windowDuration.TotalHours / 2;
         var result = new List<DashboardItemDto>();
 
         foreach (var item in items)
@@ -106,13 +110,13 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
                 continue;
 
             double salesPerHour = 0;
+            string confidence = "low";
+
             if (snapshotsByItem.TryGetValue(item.Id, out var itemSnapshots) && itemSnapshots.Count >= 2)
             {
-                var earliest = itemSnapshots.First();
-                var latest = itemSnapshots.Last();
-                var salesCount = latest.TotalTrades - earliest.TotalTrades;
-                var hours = (latest.RecordedAt - earliest.RecordedAt).TotalHours;
-                salesPerHour = hours > 0 ? salesCount / hours : 0;
+                var (segments, totalSalesCount) = AnalyzeSegments(itemSnapshots, now, halfLifeHours);
+                salesPerHour = WeightedMedian(segments);
+                confidence = GetConfidence(segments.Count, totalSalesCount);
             }
 
             var totalPreorders = latestSnapshot.TotalPreorders;
@@ -130,11 +134,76 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
                 SalesPerHour = Math.Round(salesPerHour, 2),
                 Window = window,
                 FulfillmentScore = Math.Round(fulfillmentScore, 4),
-                EstimatedFillTime = FormatFillTime(estimatedFillHours)
+                EstimatedFillTime = FormatFillTime(estimatedFillHours),
+                Confidence = confidence
             });
         }
 
         return result.OrderByDescending(r => r.FulfillmentScore).ToList();
+    }
+
+    private record SaleSegment(double SalesPerHour, double Weight);
+
+    private static (List<SaleSegment> Segments, long TotalSalesCount) AnalyzeSegments(
+        List<TradeSnapshot> snapshots, DateTime now, double halfLifeHours)
+    {
+        var segments = new List<SaleSegment>();
+        long totalSalesCount = 0;
+
+        for (int i = 1; i < snapshots.Count; i++)
+        {
+            var prev = snapshots[i - 1];
+            var curr = snapshots[i];
+            var salesDelta = curr.TotalTrades - prev.TotalTrades;
+
+            if (salesDelta <= 0)
+                continue;
+
+            totalSalesCount += salesDelta;
+
+            var hours = (curr.RecordedAt - prev.RecordedAt).TotalHours;
+            if (hours <= 0)
+                continue;
+
+            var segmentRate = (double)salesDelta / hours;
+
+            // Exponential decay weight based on segment midpoint age
+            var midpoint = prev.RecordedAt.AddHours(hours / 2);
+            var ageHours = (now - midpoint).TotalHours;
+            var weight = Math.Exp(-Math.Log(2) * ageHours / halfLifeHours);
+
+            segments.Add(new SaleSegment(segmentRate, weight));
+        }
+
+        return (segments, totalSalesCount);
+    }
+
+    private static double WeightedMedian(List<SaleSegment> segments)
+    {
+        if (segments.Count == 0) return 0;
+        if (segments.Count == 1) return segments[0].SalesPerHour;
+
+        var sorted = segments.OrderBy(s => s.SalesPerHour).ToList();
+        var totalWeight = sorted.Sum(s => s.Weight);
+
+        if (totalWeight <= 0) return 0;
+
+        double cumulativeWeight = 0;
+        for (int i = 0; i < sorted.Count; i++)
+        {
+            cumulativeWeight += sorted[i].Weight;
+            if (cumulativeWeight >= totalWeight / 2)
+                return sorted[i].SalesPerHour;
+        }
+
+        return sorted.Last().SalesPerHour;
+    }
+
+    private static string GetConfidence(int segmentCount, long totalSalesCount)
+    {
+        if (segmentCount < 3 || totalSalesCount < 3) return "low";
+        if (segmentCount > 10 && totalSalesCount >= 10) return "high";
+        return "medium";
     }
 
     private static string FormatFillTime(double hours)

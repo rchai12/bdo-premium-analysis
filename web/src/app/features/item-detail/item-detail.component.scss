@@ -76,3 +76,26 @@ h2 {
     background-color: rgba(0, 0, 0, 0.04);
   }
 }
+
+.confidence-label {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: capitalize;
+
+  &.confidence-high {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+  }
+
+  &.confidence-medium {
+    background-color: #fff8e1;
+    color: #f57f17;
+  }
+
+  &.confidence-low {
+    background-color: #fce4ec;
+    color: #c62828;
+  }
+}
