@@ -57,22 +57,16 @@
           <td mat-cell *matCellDef="let item">{{ item.name }}</td>
         </ng-container>
 
-        <!-- Price Column -->
-        <ng-container matColumnDef="basePrice">
-          <th mat-header-cell *matHeaderCellDef mat-sort-header>Price</th>
-          <td mat-cell *matCellDef="let item">{{ formatPrice(item.basePrice) }}</td>
-        </ng-container>
-
-        <!-- Stock Column -->
-        <ng-container matColumnDef="currentStock">
-          <th mat-header-cell *matHeaderCellDef mat-sort-header>Stock</th>
-          <td mat-cell *matCellDef="let item">{{ item.currentStock | number }}</td>
-        </ng-container>
-
         <!-- Preorders Column -->
         <ng-container matColumnDef="totalPreorders">
           <th mat-header-cell *matHeaderCellDef mat-sort-header>Preorders</th>
           <td mat-cell *matCellDef="let item">{{ item.totalPreorders | number }}</td>
+        </ng-container>
+
+        <!-- Sales Count Column -->
+        <ng-container matColumnDef="salesCount">
+          <th mat-header-cell *matHeaderCellDef mat-sort-header>Sales ({{ selectedWindow }})</th>
+          <td mat-cell *matCellDef="let item">{{ item.salesCount | number }}</td>
         </ng-container>
 
         <!-- Sales/Hr Column -->

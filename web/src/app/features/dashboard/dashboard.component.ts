@@ -30,9 +30,8 @@ import { DashboardItem } from '../../core/models/dashboard-item.model';
 export class DashboardComponent implements OnInit {
   displayedColumns = [
     'name',
-    'basePrice',
-    'currentStock',
     'totalPreorders',
+    'salesCount',
     'salesPerHour',
     'estimatedFillTime',
     'fulfillmentScore',
@@ -105,13 +104,6 @@ export class DashboardComponent implements OnInit {
 
   onRowClick(item: DashboardItem): void {
     this.router.navigate(['/item', item.itemId]);
-  }
-
-  formatPrice(price: number): string {
-    if (price >= 1_000_000_000) return (price / 1_000_000_000).toFixed(1) + 'B';
-    if (price >= 1_000_000) return (price / 1_000_000).toFixed(0) + 'M';
-    if (price >= 1_000) return (price / 1_000).toFixed(0) + 'K';
-    return price.toString();
   }
 
   getFulfillmentColor(score: number): string {

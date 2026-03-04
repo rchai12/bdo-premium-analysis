@@ -261,6 +261,45 @@ public class VelocityCalculatorTests
     }
 
     [Fact]
+    public async Task GetVelocityAsync_RateDecaysWhenNoNewSales()
+    {
+        using var db = CreateDb();
+        var now = DateTime.UtcNow;
+
+        db.TrackedItems.Add(new TrackedItem { Id = 1, Name = "Test Set", Grade = 2 });
+        // Sales happened early, then nothing for hours
+        // t=-6h: 100 trades, t=-5h: 110 trades (10 sales in 1h = 10/hr)
+        // Then 10 snapshots with NO sales from t=-5h to now (1 snapshot/30min)
+        db.TradeSnapshots.Add(new TradeSnapshot { ItemId = 1, RecordedAt = now.AddHours(-6), TotalTrades = 100, CurrentStock = 5, BasePrice = 1_000_000, LastSoldPrice = 1_000_000, TotalPreorders = 10 });
+        db.TradeSnapshots.Add(new TradeSnapshot { ItemId = 1, RecordedAt = now.AddHours(-5), TotalTrades = 110, CurrentStock = 5, BasePrice = 1_000_000, LastSoldPrice = 1_000_000, TotalPreorders = 10 });
+
+        // 10 zero-sale snapshots over next 5 hours
+        for (int i = 1; i <= 10; i++)
+        {
+            db.TradeSnapshots.Add(new TradeSnapshot
+            {
+                ItemId = 1,
+                RecordedAt = now.AddHours(-5).AddMinutes(30 * i),
+                TotalTrades = 110, // no change
+                CurrentStock = 5,
+                BasePrice = 1_000_000,
+                LastSoldPrice = 1_000_000,
+                TotalPreorders = 10
+            });
+        }
+        await db.SaveChangesAsync();
+
+        var calc = new VelocityCalculator(db);
+        var result = await calc.GetVelocityAsync(1);
+        var window12h = result.Windows.Single(w => w.Window == "12h");
+
+        // 1 sale segment (10/hr) + 10 zero segments (0/hr)
+        // Weighted median should be 0 (majority of segments are zero)
+        Assert.Equal(0, window12h.SalesPerHour);
+        Assert.Equal(10, window12h.SalesCount);
+    }
+
+    [Fact]
     public async Task GetDashboardAsync_IncludesConfidence()
     {
         using var db = CreateDb();

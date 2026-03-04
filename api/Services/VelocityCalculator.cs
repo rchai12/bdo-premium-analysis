@@ -111,12 +111,14 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
 
             double salesPerHour = 0;
             string confidence = "low";
+            long salesCount = 0;
 
             if (snapshotsByItem.TryGetValue(item.Id, out var itemSnapshots) && itemSnapshots.Count >= 2)
             {
                 var (segments, totalSalesCount) = AnalyzeSegments(itemSnapshots, now, halfLifeHours);
                 salesPerHour = WeightedMedian(segments);
                 confidence = GetConfidence(segments.Count, totalSalesCount);
+                salesCount = itemSnapshots.Last().TotalTrades - itemSnapshots.First().TotalTrades;
             }
 
             var totalPreorders = latestSnapshot.TotalPreorders;
@@ -128,9 +130,8 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
                 ItemId = item.Id,
                 Name = item.Name,
                 Grade = item.Grade,
-                BasePrice = latestSnapshot.BasePrice,
-                CurrentStock = latestSnapshot.CurrentStock,
                 TotalPreorders = totalPreorders,
+                SalesCount = salesCount,
                 SalesPerHour = Math.Round(salesPerHour, 2),
                 Window = window,
                 FulfillmentScore = Math.Round(fulfillmentScore, 4),
@@ -156,7 +157,7 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
             var curr = snapshots[i];
             var salesDelta = curr.TotalTrades - prev.TotalTrades;
 
-            if (salesDelta <= 0)
+            if (salesDelta < 0)
                 continue;
 
             totalSalesCount += salesDelta;
