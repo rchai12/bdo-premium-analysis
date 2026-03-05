@@ -20,4 +20,5 @@ public class TrackedItem
     public int Grade { get; set; }
 
     public ICollection<TradeSnapshot> Snapshots { get; set; } = [];
+    public ICollection<DailySummary> DailySummaries { get; set; } = [];
 }

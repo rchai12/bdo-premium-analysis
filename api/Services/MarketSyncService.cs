@@ -18,6 +18,8 @@ public class MarketSyncService(
     private static readonly TimeSpan InitialReconnectDelay = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromMinutes(5);
     private const int BatchSize = 20;
+    private static readonly TimeSpan RetentionPeriod = TimeSpan.FromDays(30);
+    private static readonly TimeSpan CompactionInterval = TimeSpan.FromHours(24);
     private readonly string _region = config.GetValue("Arsha:Region", "na")!;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -28,8 +30,10 @@ public class MarketSyncService(
         await SyncTrackedItemsAsync(stoppingToken);
         await ValidateTrackedItemsAsync(stoppingToken);
         await TakeSnapshotAsync(stoppingToken);
+        await CompactSnapshotsAsync(stoppingToken);
 
         var reconnectDelay = InitialReconnectDelay;
+        var lastCompaction = DateTime.UtcNow;
 
         // Try WebSocket-driven sync with exponential backoff on failure
         while (!stoppingToken.IsCancellationRequested)
@@ -47,6 +51,12 @@ public class MarketSyncService(
                 {
                     await Task.Delay(reconnectDelay, stoppingToken);
                     await TakeSnapshotAsync(stoppingToken);
+
+                    if (DateTime.UtcNow - lastCompaction > CompactionInterval)
+                    {
+                        await CompactSnapshotsAsync(stoppingToken);
+                        lastCompaction = DateTime.UtcNow;
+                    }
                 }
                 catch (Exception pollEx) when (!stoppingToken.IsCancellationRequested)
                 {
@@ -70,6 +80,7 @@ public class MarketSyncService(
 
         var buffer = new byte[4096];
         var lastSnapshot = DateTime.UtcNow;
+        var lastCompaction = DateTime.UtcNow;
 
         while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
@@ -103,6 +114,13 @@ public class MarketSyncService(
                     logger.LogInformation("Fallback interval reached during WebSocket, taking snapshot");
                     await TakeSnapshotAsync(ct);
                     lastSnapshot = DateTime.UtcNow;
+                }
+
+                // Daily compaction check
+                if (DateTime.UtcNow - lastCompaction > CompactionInterval)
+                {
+                    await CompactSnapshotsAsync(ct);
+                    lastCompaction = DateTime.UtcNow;
                 }
             }
         }
@@ -219,6 +237,77 @@ public class MarketSyncService(
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to validate tracked items");
+        }
+    }
+
+    private async Task CompactSnapshotsAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var cutoff = DateTime.UtcNow - RetentionPeriod;
+            var oldSnapshots = await db.TradeSnapshots
+                .Where(s => s.RecordedAt < cutoff)
+                .OrderBy(s => s.ItemId)
+                .ThenBy(s => s.RecordedAt)
+                .ToListAsync(ct);
+
+            if (oldSnapshots.Count == 0)
+            {
+                logger.LogInformation("No snapshots older than {Days} days to compact", RetentionPeriod.TotalDays);
+                return;
+            }
+
+            logger.LogInformation("Compacting {Count} snapshots older than {Cutoff:u}", oldSnapshots.Count, cutoff);
+
+            // Group by item and date, aggregate into daily summaries
+            var groups = oldSnapshots
+                .GroupBy(s => new { s.ItemId, Date = DateOnly.FromDateTime(s.RecordedAt) });
+
+            var summaries = new List<DailySummary>();
+            foreach (var group in groups)
+            {
+                var sorted = group.OrderBy(s => s.RecordedAt).ToList();
+                var salesCount = sorted.Last().TotalTrades - sorted.First().TotalTrades;
+                if (salesCount < 0) salesCount = 0;
+
+                summaries.Add(new DailySummary
+                {
+                    ItemId = group.Key.ItemId,
+                    Date = group.Key.Date,
+                    SalesCount = salesCount,
+                    AvgBasePrice = (long)sorted.Average(s => s.BasePrice),
+                    AvgPreorders = (long)sorted.Average(s => s.TotalPreorders),
+                    SnapshotCount = sorted.Count,
+                });
+            }
+
+            // Upsert: skip dates that already have a summary
+            var existingKeys = await db.DailySummaries
+                .Where(d => d.Date < DateOnly.FromDateTime(cutoff))
+                .Select(d => new { d.ItemId, d.Date })
+                .ToListAsync(ct);
+            var existingSet = existingKeys.ToHashSet();
+
+            var newSummaries = summaries
+                .Where(s => !existingSet.Contains(new { s.ItemId, s.Date }))
+                .ToList();
+
+            if (newSummaries.Count > 0)
+                db.DailySummaries.AddRange(newSummaries);
+
+            db.TradeSnapshots.RemoveRange(oldSnapshots);
+            await db.SaveChangesAsync(ct);
+
+            logger.LogInformation(
+                "Compaction complete: {Deleted} snapshots removed, {Created} daily summaries created",
+                oldSnapshots.Count, newSummaries.Count);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to compact snapshots");
         }
     }
 
