@@ -26,6 +26,7 @@ public class MarketSyncService(
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
         await SyncTrackedItemsAsync(stoppingToken);
+        await ValidateTrackedItemsAsync(stoppingToken);
         await TakeSnapshotAsync(stoppingToken);
 
         var reconnectDelay = InitialReconnectDelay;
@@ -114,7 +115,9 @@ public class MarketSyncService(
             var allItems = await arshaClient.GetItemDatabaseAsync(ct);
             var premiumItems = allItems
                 .Where(i => i.Name.Contains("Premium", StringComparison.OrdinalIgnoreCase)
-                         && i.Name.Contains("Set", StringComparison.OrdinalIgnoreCase))
+                         && i.Name.Contains("Set", StringComparison.OrdinalIgnoreCase)
+                         && !i.Name.Contains("Days)", StringComparison.OrdinalIgnoreCase)
+                         && !i.Name.Contains("Day)", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
             logger.LogInformation("Found {Count} premium set items in database", premiumItems.Count);
@@ -158,6 +161,64 @@ public class MarketSyncService(
         catch (Exception ex)
         {
             logger.LogError(ex, "Failed to sync tracked items");
+        }
+    }
+
+    private async Task ValidateTrackedItemsAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var trackedItems = await db.TrackedItems.ToListAsync(ct);
+            logger.LogInformation("Validating {Count} tracked items against market API", trackedItems.Count);
+
+            // Remove time-limited items that slipped through earlier syncs
+            var timedItems = trackedItems
+                .Where(i => i.Name.Contains("Days)", StringComparison.OrdinalIgnoreCase)
+                         || i.Name.Contains("Day)", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (timedItems.Count > 0)
+            {
+                db.TrackedItems.RemoveRange(timedItems);
+                logger.LogInformation("Removed {Count} time-limited items", timedItems.Count);
+                trackedItems = trackedItems.Except(timedItems).ToList();
+            }
+
+            // Validate each item individually against the market API
+            var invalidIds = new List<int>();
+            foreach (var item in trackedItems)
+            {
+                try
+                {
+                    var result = await arshaClient.GetItemDataAsync([item.Id], _region, ct);
+                    if (result.Count == 0)
+                        invalidIds.Add(item.Id);
+                }
+                catch
+                {
+                    invalidIds.Add(item.Id);
+                }
+
+                await Task.Delay(RequestDelay, ct);
+            }
+
+            if (invalidIds.Count > 0)
+            {
+                var toRemove = await db.TrackedItems.Where(i => invalidIds.Contains(i.Id)).ToListAsync(ct);
+                db.TrackedItems.RemoveRange(toRemove);
+                logger.LogInformation("Removed {Count} items that returned 404 from market API", toRemove.Count);
+            }
+
+            await db.SaveChangesAsync(ct);
+            var remaining = await db.TrackedItems.CountAsync(ct);
+            logger.LogInformation("Validation complete: {Count} valid tracked items remaining", remaining);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to validate tracked items");
         }
     }
 
