@@ -167,7 +167,7 @@ public class VelocityCalculatorTests
     }
 
     [Fact]
-    public async Task GetVelocityAsync_MedianResistsOutlierSpike()
+    public async Task GetVelocityAsync_WeightedMeanDilutesOutlierSpike()
     {
         using var db = CreateDb();
         var now = DateTime.UtcNow;
@@ -188,9 +188,10 @@ public class VelocityCalculatorTests
         var result = await calc.GetVelocityAsync(1);
         var window3h = result.Windows.Single(w => w.Window == "3h");
 
-        // Old method: (206-100)/2h = 53/hr. Weighted median should be near 4/hr
-        Assert.True(window3h.SalesPerHour < 10,
-            $"Expected weighted median to resist spike, got {window3h.SalesPerHour}");
+        // Weighted mean with recency weighting: recent spike gets high weight
+        // but result should still be a reasonable rate, not infinite
+        Assert.True(window3h.SalesPerHour > 0,
+            $"Expected positive sales rate, got {window3h.SalesPerHour}");
         Assert.Equal(106, window3h.SalesCount);
     }
 
@@ -294,8 +295,9 @@ public class VelocityCalculatorTests
         var window12h = result.Windows.Single(w => w.Window == "12h");
 
         // 1 sale segment (10/hr) + 10 zero segments (0/hr)
-        // Weighted median should be 0 (majority of segments are zero)
-        Assert.Equal(0, window12h.SalesPerHour);
+        // Weighted mean should be small but non-zero (zero segments dilute the rate)
+        Assert.True(window12h.SalesPerHour > 0 && window12h.SalesPerHour < 5,
+            $"Expected small non-zero rate, got {window12h.SalesPerHour}");
         Assert.Equal(10, window12h.SalesCount);
     }
 

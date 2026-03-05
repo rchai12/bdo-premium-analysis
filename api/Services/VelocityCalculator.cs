@@ -56,7 +56,7 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
             var halfLifeHours = duration.TotalHours / 2;
             var (segments, totalSalesCount) = AnalyzeSegments(snapshots, now, halfLifeHours);
 
-            var salesPerHour = WeightedMedian(segments);
+            var salesPerHour = WeightedMean(segments);
             var avgPreorders = snapshots.Average(s => (double)s.TotalPreorders);
             var salesCount = snapshots.Last().TotalTrades - snapshots.First().TotalTrades;
 
@@ -116,7 +116,7 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
             if (snapshotsByItem.TryGetValue(item.Id, out var itemSnapshots) && itemSnapshots.Count >= 2)
             {
                 var (segments, totalSalesCount) = AnalyzeSegments(itemSnapshots, now, halfLifeHours);
-                salesPerHour = WeightedMedian(segments);
+                salesPerHour = WeightedMean(segments);
                 confidence = GetConfidence(segments.Count, totalSalesCount);
                 salesCount = itemSnapshots.Last().TotalTrades - itemSnapshots.First().TotalTrades;
             }
@@ -179,25 +179,15 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
         return (segments, totalSalesCount);
     }
 
-    private static double WeightedMedian(List<SaleSegment> segments)
+    private static double WeightedMean(List<SaleSegment> segments)
     {
         if (segments.Count == 0) return 0;
-        if (segments.Count == 1) return segments[0].SalesPerHour;
 
-        var sorted = segments.OrderBy(s => s.SalesPerHour).ToList();
-        var totalWeight = sorted.Sum(s => s.Weight);
-
+        var totalWeight = segments.Sum(s => s.Weight);
         if (totalWeight <= 0) return 0;
 
-        double cumulativeWeight = 0;
-        for (int i = 0; i < sorted.Count; i++)
-        {
-            cumulativeWeight += sorted[i].Weight;
-            if (cumulativeWeight >= totalWeight / 2)
-                return sorted[i].SalesPerHour;
-        }
-
-        return sorted.Last().SalesPerHour;
+        var weightedSum = segments.Sum(s => s.SalesPerHour * s.Weight);
+        return weightedSum / totalWeight;
     }
 
     private static string GetConfidence(int segmentCount, long totalSalesCount)
