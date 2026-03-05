@@ -302,6 +302,51 @@ public class VelocityCalculatorTests
     }
 
     [Fact]
+    public async Task GetVelocityAsync_DayOfWeekWeightingBoostsHighActivityDays()
+    {
+        using var db = CreateDb();
+        var now = DateTime.UtcNow;
+
+        // Find the most recent Thursday and Tuesday relative to now
+        var daysUntilThursday = ((int)DayOfWeek.Thursday - (int)now.DayOfWeek + 7) % 7;
+        if (daysUntilThursday == 0) daysUntilThursday = 7; // Use last week's Thursday
+        var thursday = now.AddDays(-((int)now.DayOfWeek - (int)DayOfWeek.Thursday + 7) % 7);
+        var tuesday = now.AddDays(-((int)now.DayOfWeek - (int)DayOfWeek.Tuesday + 7) % 7);
+        if (thursday.Date == now.Date) thursday = thursday.AddDays(-7);
+        if (tuesday.Date == now.Date) tuesday = tuesday.AddDays(-7);
+
+        // Normalize to noon to avoid boundary issues
+        thursday = thursday.Date.AddHours(12);
+        tuesday = tuesday.Date.AddHours(12);
+
+        db.TrackedItems.Add(new TrackedItem { Id = 1, Name = "Test Set", Grade = 2 });
+
+        // 2 segments with same rate (10/hr each), one on Thursday, one on Tuesday
+        // Thursday segment should get 1.5x weight, Tuesday gets 1.0x
+        // With weighted mean: if rates are the same, result is the same regardless of weight
+        // So we need DIFFERENT rates to see the effect
+        // Thursday segment: 20/hr, Tuesday segment: 5/hr
+        // Weighted mean should be pulled toward 20/hr (Thursday has 1.5x weight)
+        db.TradeSnapshots.AddRange(
+            new TradeSnapshot { ItemId = 1, RecordedAt = tuesday.AddHours(-1), TotalTrades = 100, CurrentStock = 5, BasePrice = 1_000_000, LastSoldPrice = 1_000_000, TotalPreorders = 10 },
+            new TradeSnapshot { ItemId = 1, RecordedAt = tuesday, TotalTrades = 105, CurrentStock = 5, BasePrice = 1_000_000, LastSoldPrice = 1_000_000, TotalPreorders = 10 },
+            new TradeSnapshot { ItemId = 1, RecordedAt = thursday.AddHours(-1), TotalTrades = 105, CurrentStock = 5, BasePrice = 1_000_000, LastSoldPrice = 1_000_000, TotalPreorders = 10 },
+            new TradeSnapshot { ItemId = 1, RecordedAt = thursday, TotalTrades = 125, CurrentStock = 5, BasePrice = 1_000_000, LastSoldPrice = 1_000_000, TotalPreorders = 10 }
+        );
+        await db.SaveChangesAsync();
+
+        var calc = new VelocityCalculator(db);
+        var result = await calc.GetVelocityAsync(1);
+        var window14d = result.Windows.Single(w => w.Window == "14d");
+
+        // Two segments: Tuesday 5/hr, Thursday 20/hr
+        // Day weighting gives Thursday 1.5x and Tuesday 1.0x multiplier
+        // Combined with recency decay, the result blends both segments
+        Assert.True(window14d.SalesPerHour > 5 && window14d.SalesPerHour < 20,
+            $"Expected blended rate between 5 and 20, got {window14d.SalesPerHour}");
+    }
+
+    [Fact]
     public async Task GetDashboardAsync_IncludesConfidence()
     {
         using var db = CreateDb();

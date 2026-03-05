@@ -143,6 +143,18 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
         return result.OrderByDescending(r => r.FulfillmentScore).ToList();
     }
 
+    // Day-of-week weight multipliers for BDO market patterns
+    private static readonly Dictionary<DayOfWeek, double> DayOfWeekWeights = new()
+    {
+        [DayOfWeek.Monday] = 1.3,    // Purchase limit resets on discounted bundles
+        [DayOfWeek.Tuesday] = 1.0,
+        [DayOfWeek.Wednesday] = 1.0,
+        [DayOfWeek.Thursday] = 1.5,  // Maintenance + Pearl Shop refresh
+        [DayOfWeek.Friday] = 1.3,    // Payday spending
+        [DayOfWeek.Saturday] = 1.2,  // Weekend spending
+        [DayOfWeek.Sunday] = 1.0,
+    };
+
     private record SaleSegment(double SalesPerHour, double Weight);
 
     private static (List<SaleSegment> Segments, long TotalSalesCount) AnalyzeSegments(
@@ -171,7 +183,8 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
             // Exponential decay weight based on segment midpoint age
             var midpoint = prev.RecordedAt.AddHours(hours / 2);
             var ageHours = (now - midpoint).TotalHours;
-            var weight = Math.Exp(-Math.Log(2) * ageHours / halfLifeHours);
+            var weight = Math.Exp(-Math.Log(2) * ageHours / halfLifeHours)
+                       * DayOfWeekWeights[midpoint.DayOfWeek];
 
             segments.Add(new SaleSegment(segmentRate, weight));
         }
