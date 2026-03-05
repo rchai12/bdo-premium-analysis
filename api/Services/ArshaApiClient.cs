@@ -16,8 +16,9 @@ public class ArshaApiClient(HttpClient httpClient, ILogger<ArshaApiClient> logge
         logger.LogInformation("Fetching full item database from arsha.io");
         var response = await httpClient.GetAsync("/util/db?lang=en", ct);
         response.EnsureSuccessStatusCode();
-        var items = await response.Content.ReadFromJsonAsync<List<ArshaDbItem>>(JsonOptions, ct);
-        return items ?? [];
+        var items = await response.Content.ReadFromJsonAsync<List<ArshaDbItem>>(JsonOptions, ct) ?? [];
+        logger.LogInformation("Fetched {Count} items from arsha.io database", items.Count);
+        return items;
     }
 
     public async Task<List<ArshaMarketItem>> GetItemDataAsync(IEnumerable<int> itemIds, string region = "na", CancellationToken ct = default)

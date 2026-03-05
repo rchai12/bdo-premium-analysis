@@ -57,7 +57,7 @@ builder.Services.AddHttpClient<IArshaApiClient, ArshaApiClient>(client =>
 {
     client.BaseAddress = new Uri(builder.Configuration.GetValue("Arsha:BaseUrl", "https://api.arsha.io")!);
     client.DefaultRequestHeaders.Add("User-Agent", "BdoMarketTracker/1.0");
-    client.Timeout = TimeSpan.FromSeconds(30);
+    client.Timeout = TimeSpan.FromSeconds(120);
 })
 .AddPolicyHandler(HttpPolicyExtensions
     .HandleTransientHttpError()

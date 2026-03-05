@@ -119,6 +119,9 @@ public class MarketSyncService(
 
             logger.LogInformation("Found {Count} premium set items in database", premiumItems.Count);
 
+            if (premiumItems.Count < 100)
+                logger.LogWarning("Suspiciously few premium sets ({Count}). The /util/db response may have been truncated or timed out", premiumItems.Count);
+
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
