@@ -232,8 +232,8 @@ Internet :80/:443
    Cloudflare (SSL termination, proxy)
        │
    Nginx (reverse proxy, port 80)
-       ├── api.bdo-premium-costume-tracker.win  →  bdo-api :8080
-       └── stocks.yourdomain.com                →  stock-predictor-nginx :80 (via proxy_net)
+       ├── bdo-api.yourdomain.com  →  bdo-api :8080
+       └── stocks.yourdomain.com   →  stock-predictor-nginx :80 (via proxy_net)
 ```
 
 - Cloudflare handles SSL (proxied A records) — origin is HTTP-only
