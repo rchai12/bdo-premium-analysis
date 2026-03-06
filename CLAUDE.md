@@ -36,20 +36,21 @@ bdo-market-tracker/
 │   ├── Data/
 │   │   └── AppDbContext.cs       # IdentityDbContext<ApplicationUser>, EF Core indexes
 │   ├── Dtos/
-│   │   ├── DashboardItemDto.cs   # Dashboard response shape
+│   │   ├── DashboardItemDto.cs   # Dashboard response shape (salesCount, salesPerHour, fulfillmentScore, etc.)
 │   │   └── VelocityDto.cs        # Velocity windows response shape
 │   ├── Migrations/               # EF Core migrations (auto-applied on startup)
 │   ├── Models/
 │   │   ├── ApplicationUser.cs    # ASP.NET Core Identity user entity
 │   │   ├── ArshaModels.cs        # Arsha API response DTOs (ArshaDbItem, ArshaMarketItem, etc.)
+│   │   ├── DailySummary.cs       # Compacted daily aggregate (sales, avg price, avg preorders per item per day)
 │   │   ├── TrackedItem.cs        # Item entity (id, name, grade)
 │   │   └── TradeSnapshot.cs      # Snapshot entity (trades, stock, price, preorders, timestamp)
 │   ├── Services/
 │   │   ├── IArshaApiClient.cs    # Interface for Arsha HTTP client
-│   │   ├── ArshaApiClient.cs     # HttpClient wrapper for arsha.io endpoints (with Polly retry)
+│   │   ├── ArshaApiClient.cs     # HttpClient wrapper for arsha.io endpoints (120s timeout, Polly retry)
 │   │   ├── IVelocityCalculator.cs # Interface for velocity calculator
-│   │   ├── VelocityCalculator.cs # Batch-optimized sales velocity & fulfillment calculations
-│   │   └── MarketSyncService.cs  # Background service: WebSocket + polling with exponential backoff
+│   │   ├── VelocityCalculator.cs # Weighted mean velocity, day-of-week weighting, fulfillment calculations
+│   │   └── MarketSyncService.cs  # Background service: WebSocket + polling, item validation, snapshot compaction
 │   ├── Program.cs                # DI, Identity, JWT, CORS, Polly, rate limiting, health checks, auto-migrate, admin seed
 │   ├── Dockerfile                # Multi-stage .NET 9 build for Oracle Cloud VM
 │   ├── .dockerignore               # Docker build exclusions
@@ -59,7 +60,7 @@ bdo-market-tracker/
 │
 ├── api.Tests/                    # xUnit test project
 │   ├── BdoMarketTracker.Tests.csproj
-│   └── VelocityCalculatorTests.cs  # 5 tests using EF Core InMemory provider
+│   └── VelocityCalculatorTests.cs  # 11 tests using EF Core InMemory provider
 │
 ├── web/                          # Angular 18 SPA
 │   └── src/app/
@@ -82,6 +83,12 @@ bdo-market-tracker/
 │       ├── app.component.ts      # Root component with toolbar + logout button
 │       ├── app.config.ts         # Providers: routing, HTTP with auth interceptor, animations
 │       └── app.routes.ts         # Guarded routes: / -> dashboard, /item/:id -> detail, /login -> login
+│
+├── deploy/                       # Docker Compose + Nginx reverse proxy
+│   ├── docker-compose.yml        # Nginx + bdo-api (+ future apps)
+│   ├── nginx/conf.d/default.conf # Domain-based routing rules
+│   ├── .env.example              # Template for production secrets
+│   └── .env                      # Real secrets (gitignored)
 │
 ├── .gitignore                    # Ignores secrets, build artifacts, node_modules
 └── CLAUDE.md                     # This file
@@ -109,23 +116,42 @@ arsha.io caches BDO market data for **30 minutes**. The backend syncs in lockste
 - **Primary:** WebSocket connection to `wss://api.arsha.io/events` — listens for `ExpiredEvent` cache invalidations
 - **Fallback:** 30-minute polling timer if WebSocket disconnects
 - **Reconnect:** Exponential backoff on WebSocket failures (5s → 5min cap)
-- **Resilience:** Polly retry policy (3 retries, exponential backoff) on all HTTP calls to arsha.io
+- **Resilience:** Polly retry policy (3 retries, exponential backoff) on all HTTP calls to arsha.io (120s timeout)
 - **Error isolation:** Per-item try/catch in snapshot collection — one failure doesn't lose the batch
 - Snapshots are stored in `trade_snapshots` with a composite index on `(item_id, recorded_at DESC)`
 
+### Data Retention
+- **Raw snapshots** are kept for **30 days** (the velocity calculator's longest window is 14d)
+- **Daily compaction** runs on startup and once per day: aggregates old snapshots into `daily_summaries` (sales count, avg price, avg preorders per item per day) then deletes the raw rows
+- Keeps Neon free tier (512MB) usage sustainable (~120MB for 30 days of raw snapshots + negligible daily summaries)
+
 ### Tracked Items
-On startup, `MarketSyncService` fetches the full item database from `/util/db?lang=en` and filters for items containing both "Premium" AND "Set" (case-insensitive). These are upserted into `tracked_items`.
+On startup, `MarketSyncService`:
+1. Fetches the full item database from `/util/db?lang=en` and filters for items containing both "Premium" AND "Set" (case-insensitive), **excluding** time-limited rentals (names containing "Days)" or "Day)")
+2. Upserts matches into `tracked_items`
+3. **Validates** each tracked item individually against the market API — items that return 404 are removed (arsha.io's `/util/db` includes ~130 legacy/duplicate IDs that don't exist on the live market)
+4. Result: ~284 valid tradeable premium sets across 32 BDO classes
+
+**Note:** arsha.io's batch `/v2/na/item` endpoint returns 404 for the **entire batch** if any single ID is invalid. The validation step prevents this from poisoning snapshot collection.
 
 ### Velocity Calculation
-- **Sales velocity** uses a **weighted median** of consecutive snapshot segment rates, not a simple average
-  - Consecutive snapshot pairs where `totalTrades` increased form "segments"
-  - Each segment gets an **exponential decay weight** (half-life = half the window duration) — recent sales matter more
-  - The **weighted median** of segment rates becomes `salesPerHour` — robust to single-sale spikes
+- **Sales velocity** uses a **weighted mean** of consecutive snapshot segment rates
+  - Consecutive snapshot pairs form "segments" — **including zero-sale segments** (so rates decay when no sales occur)
+  - Each segment gets an **exponential decay weight** (half-life = half the window duration) — recent activity matters more
+  - **Day-of-week weighting** multiplied into each segment's weight:
+    - Thursday: 1.5× (maintenance/pearl shop refresh)
+    - Monday & Friday: 1.3× (limit resets / payday)
+    - Saturday: 1.2× (weekend activity)
+    - Other days: 1.0×
+  - The **weighted mean** of segment rates becomes `salesPerHour`
 - **Time windows:** 3h, 12h, 24h, 3d, 7d, 14d
 - **Confidence indicator:** "low" (<3 segments or <3 sales), "medium" (3–10 segments), "high" (>10 segments and ≥10 sales)
 - **Fulfillment score** = `sales_per_hour / total_preorders` (higher = faster fill)
 - **Estimated fill time** = `total_preorders / sales_per_hour`
 - **Query optimization:** Batch queries (3 total for dashboard, 2 for velocity) instead of N+1 per item
+
+### Dashboard Columns
+`name`, `totalPreorders`, `salesCount` (trades in selected window), `salesPerHour`, `estimatedFillTime`, `fulfillmentScore`, `confidence`
 
 ### API Endpoints
 | Method | Path | Auth | Description |
@@ -158,7 +184,7 @@ npx ng serve                      # Runs on http://localhost:4200
 dotnet test api.Tests/
 ```
 
-Backend auto-migrates the database and seeds the admin user on startup. CORS is configured from `appsettings.json`.
+Backend auto-migrates the database and seeds the admin user on startup. The background service startup sequence is: sync tracked items → validate against market API → take first snapshot → compact old snapshots → enter WebSocket loop. CORS is configured from `appsettings.json`.
 
 Login at `http://localhost:4200` with the dev credentials above.
 
@@ -189,16 +215,64 @@ Configuration uses ASP.NET Core's layered approach: `appsettings.json` (base/pla
 **tracked_items:** `id` (PK, BDO item ID), `name`, `grade`
 **trade_snapshots:** `id` (serial PK), `item_id` (FK), `recorded_at`, `total_trades`, `current_stock`, `base_price`, `last_sold_price`, `total_preorders`
 - Index: `(item_id, recorded_at DESC)`
+- Retained for 30 days, then compacted into daily summaries
+
+**daily_summaries:** `id` (serial PK), `item_id` (FK), `date`, `sales_count`, `avg_base_price`, `avg_preorders`, `snapshot_count`
+- Unique index: `(item_id, date)`
+- Created by compaction of old snapshots — lightweight long-term historical data
 
 ## Deployment
 
-- **API:** Oracle Cloud VM running Docker container from `api/Dockerfile`.
-  - SSH into VM, `git pull`, rebuild with `docker build -t bdo-api ./api && docker run -d ...`
-  - Pass config via Docker environment variables (`-e` flags or `.env` file)
-- **Frontend:** Cloudflare Pages. Root directory `web`, output `dist/web/browser`.
-  - Build command: `sed -i "s|apiUrl: ''|apiUrl: '$API_URL'|" src/environments/environment.prod.ts && npm install && npx ng build`
-  - `API_URL` is set as a **Secret** in Cloudflare Pages Variables & Secrets (keeps the server IP out of the repo)
-- **API env vars (Docker):** `ConnectionStrings__DefaultConnection`, `Jwt__Key`, `Admin__Email`, `Admin__Password`, `Cors__AllowedOrigins__0`, `ASPNETCORE_ENVIRONMENT=Production`
+### Infrastructure
+Oracle Cloud VM runs a **shared Nginx reverse proxy** in front of multiple Docker containers via `deploy/docker-compose.yml`:
+
+```
+Internet :80/:443
+       │
+   Cloudflare (SSL termination, proxy)
+       │
+   Nginx (reverse proxy, port 80)
+       ├── api.bdo-premium-costume-tracker.win  →  bdo-api :8080
+       └── stocks.yourdomain.com                →  stock-predictor-nginx :80 (via proxy_net)
+```
+
+- Cloudflare handles SSL (proxied A records) — origin is HTTP-only
+- Each app runs on an internal port (`expose`, not `ports`) — only Nginx is public
+- Nginx routes by `server_name` (domain/subdomain) and returns 444 for unknown hosts
+- Apps across separate Docker Compose projects share the `proxy_net` external network
+- Config: `deploy/nginx/conf.d/default.conf`
+
+### Deploying the API
+```bash
+# On the Oracle Cloud VM (first time):
+docker network create proxy_net   # Shared network for cross-compose routing
+cd deploy
+cp .env.example .env              # Fill in real secrets
+docker compose up -d --build      # Build and start all services
+docker compose logs -f bdo-api    # Watch logs
+```
+
+To redeploy after code changes:
+```bash
+cd deploy
+git pull
+docker compose up -d --build bdo-api
+```
+
+### Frontend
+Cloudflare Pages. Root directory `web`, output `dist/web/browser`.
+- Build command: `sed -i "s|apiUrl: ''|apiUrl: '$API_URL'|" src/environments/environment.prod.ts && npm install && npx ng build`
+- `API_URL` is set as a **Secret** in Cloudflare Pages Variables & Secrets (keeps the server IP out of the repo)
+
+### Adding a new app to the VM
+1. Add the app's Docker Compose with `proxy_net` as an external network
+2. Add a `server {}` block in `deploy/nginx/conf.d/default.conf` with the new domain
+3. Add a Cloudflare DNS A record (proxied) pointing the subdomain to the VM IP
+4. `docker compose up -d --build` in both projects, restart nginx if config changed
+
+### API env vars
+Stored in `deploy/.env` (gitignored). See `deploy/.env.example` for the template:
+`ConnectionStrings__DefaultConnection`, `Jwt__Key`, `Admin__Email`, `Admin__Password`, `Cors__AllowedOrigins__0`
 
 ## Common Tasks
 
@@ -207,6 +281,9 @@ Edit `MarketSyncService.SyncTrackedItemsAsync()` — modify the `.Where()` LINQ 
 
 ### Change polling interval
 Edit `MarketSyncService.FallbackInterval` (currently 30 min). Don't go below 30 min — arsha.io cache TTL makes it pointless.
+
+### Change data retention period
+Edit `MarketSyncService.RetentionPeriod` (currently 30 days). Must be ≥14 days (the longest velocity window).
 
 ### Add a new time window
 Edit `VelocityCalculator.WindowDefinitions` dictionary — add entry like `["30d"] = TimeSpan.FromDays(30)`.

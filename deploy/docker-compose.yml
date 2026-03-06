@@ -1,0 +1,35 @@
+networks:
+  proxy_net:
+    external: true
+
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    networks:
+      - default
+      - proxy_net
+    depends_on:
+      - bdo-api
+    restart: unless-stopped
+
+  bdo-api:
+    build:
+      context: ../api
+      dockerfile: Dockerfile
+    expose:
+      - "8080"
+    env_file:
+      - .env
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

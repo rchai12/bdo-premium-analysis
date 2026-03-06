@@ -11,6 +11,12 @@ api/appsettings.Production.json
 # User secrets
 api/secrets.json
 
+# Deploy secrets and TLS certs
+deploy/.env
+deploy/.env.*
+!deploy/.env.example
+deploy/nginx/certs/
+
 # Angular (covered by web/.gitignore, but just in case)
 web/node_modules/
 web/dist/
