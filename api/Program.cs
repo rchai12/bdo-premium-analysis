@@ -64,6 +64,7 @@ builder.Services.AddHttpClient<IArshaApiClient, ArshaApiClient>(client =>
     .WaitAndRetryAsync(3, attempt => TimeSpan.FromSeconds(Math.Pow(2, attempt))));
 
 // Services
+builder.Services.AddScoped<ICorrectionFactorProvider, CorrectionFactorProvider>();
 builder.Services.AddScoped<IVelocityCalculator, VelocityCalculator>();
 builder.Services.AddHostedService<MarketSyncService>();
 

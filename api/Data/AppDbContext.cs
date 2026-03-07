@@ -9,6 +9,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<TrackedItem> TrackedItems => Set<TrackedItem>();
     public DbSet<TradeSnapshot> TradeSnapshots => Set<TradeSnapshot>();
     public DbSet<DailySummary> DailySummaries => Set<DailySummary>();
+    public DbSet<VelocityPrediction> VelocityPredictions => Set<VelocityPrediction>();
+    public DbSet<CorrectionFactor> CorrectionFactors => Set<CorrectionFactor>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -32,6 +34,31 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
 
             entity.HasOne(e => e.Item)
                   .WithMany(i => i.DailySummaries)
+                  .HasForeignKey(e => e.ItemId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<VelocityPrediction>(entity =>
+        {
+            entity.HasIndex(e => e.EvaluationDueAt)
+                  .HasFilter("evaluated_at IS NULL");
+
+            entity.HasIndex(e => new { e.ItemId, e.Window, e.PredictedAt })
+                  .IsDescending(false, false, true);
+
+            entity.HasOne(e => e.Item)
+                  .WithMany(i => i.VelocityPredictions)
+                  .HasForeignKey(e => e.ItemId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CorrectionFactor>(entity =>
+        {
+            entity.HasIndex(e => new { e.ItemId, e.Window })
+                  .IsUnique();
+
+            entity.HasOne(e => e.Item)
+                  .WithMany(i => i.CorrectionFactors)
                   .HasForeignKey(e => e.ItemId)
                   .OnDelete(DeleteBehavior.Cascade);
         });

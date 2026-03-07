@@ -41,7 +41,7 @@ export class ItemDetailComponent implements OnInit {
     responsive: true,
     maintainAspectRatio: false,
     plugins: {
-      legend: { display: false },
+      legend: { display: true, position: 'top' },
     },
     scales: {
       y: {
@@ -99,17 +99,29 @@ export class ItemDetailComponent implements OnInit {
 
   private buildCharts(data: Velocity): void {
     const labels = data.windows.map((w) => w.window);
+    const hasCorrection = data.windows.some((w) => w.correctionFactor !== 1);
+
+    const datasets: any[] = [
+      {
+        data: data.windows.map((w) => w.salesPerHour),
+        backgroundColor: '#42a5f5',
+        borderRadius: 4,
+        label: hasCorrection ? 'Calibrated Sales/Hr' : 'Sales/Hr',
+      },
+    ];
+
+    if (hasCorrection) {
+      datasets.push({
+        data: data.windows.map((w) => w.rawSalesPerHour),
+        backgroundColor: '#90caf9',
+        borderRadius: 4,
+        label: 'Raw Sales/Hr',
+      });
+    }
 
     this.velocityChartData = {
       labels,
-      datasets: [
-        {
-          data: data.windows.map((w) => w.salesPerHour),
-          backgroundColor: '#42a5f5',
-          borderRadius: 4,
-          label: 'Sales/Hr',
-        },
-      ],
+      datasets,
     };
 
     this.preorderChartData = {

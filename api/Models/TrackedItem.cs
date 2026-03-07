@@ -21,4 +21,6 @@ public class TrackedItem
 
     public ICollection<TradeSnapshot> Snapshots { get; set; } = [];
     public ICollection<DailySummary> DailySummaries { get; set; } = [];
+    public ICollection<VelocityPrediction> VelocityPredictions { get; set; } = [];
+    public ICollection<CorrectionFactor> CorrectionFactors { get; set; } = [];
 }

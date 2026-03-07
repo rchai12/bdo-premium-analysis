@@ -8,6 +8,8 @@ public class DashboardItemDto
     public long TotalPreorders { get; set; }
     public long SalesCount { get; set; }
     public double SalesPerHour { get; set; }
+    public double RawSalesPerHour { get; set; }
+    public double CorrectionFactor { get; set; } = 1.0;
     public string Window { get; set; } = "24h";
     public double FulfillmentScore { get; set; }
     public string EstimatedFillTime { get; set; } = string.Empty;

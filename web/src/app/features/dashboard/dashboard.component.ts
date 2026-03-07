@@ -8,6 +8,7 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { ApiService } from '../../core/services/api.service';
 import { DashboardItem } from '../../core/models/dashboard-item.model';
 
@@ -23,6 +24,7 @@ import { DashboardItem } from '../../core/models/dashboard-item.model';
     MatChipsModule,
     MatIconModule,
     MatButtonToggleModule,
+    MatTooltipModule,
   ],
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',
@@ -126,5 +128,16 @@ export class DashboardComponent implements OnInit {
       case 'medium': return 'confidence-medium';
       default: return 'confidence-low';
     }
+  }
+
+  getCorrectionTooltip(item: DashboardItem): string {
+    if (item.correctionFactor === 1) return '';
+    const pct = ((item.correctionFactor - 1) * 100).toFixed(0);
+    const sign = item.correctionFactor > 1 ? '+' : '';
+    return `Calibrated ${sign}${pct}% (raw: ${item.rawSalesPerHour}/hr)`;
+  }
+
+  hasCorrectionFactor(item: DashboardItem): boolean {
+    return item.correctionFactor !== 1 && item.correctionFactor !== 0;
   }
 }

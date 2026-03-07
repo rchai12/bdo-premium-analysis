@@ -5,6 +5,8 @@ export interface DashboardItem {
   totalPreorders: number;
   salesCount: number;
   salesPerHour: number;
+  rawSalesPerHour: number;
+  correctionFactor: number;
   window: string;
   fulfillmentScore: number;
   estimatedFillTime: string;

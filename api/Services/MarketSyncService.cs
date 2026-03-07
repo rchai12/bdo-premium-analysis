@@ -20,7 +20,20 @@ public class MarketSyncService(
     private const int BatchSize = 20;
     private static readonly TimeSpan RetentionPeriod = TimeSpan.FromDays(30);
     private static readonly TimeSpan CompactionInterval = TimeSpan.FromHours(24);
+    private static readonly TimeSpan PredictionRetention = TimeSpan.FromDays(30);
     private readonly string _region = config.GetValue("Arsha:Region", "na")!;
+
+    private const double EmaAlpha = 0.15;
+    private const double EmaAlphaWarmup = 0.3;
+    private const int WarmupSamples = 10;
+
+    // Windows to track predictions for (subset of VelocityCalculator.WindowDefinitions)
+    private static readonly Dictionary<string, TimeSpan> EvaluationHorizons = new()
+    {
+        ["24h"] = TimeSpan.FromHours(6),
+        ["3d"] = TimeSpan.FromHours(12),
+        ["7d"] = TimeSpan.FromHours(24),
+    };
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -30,6 +43,8 @@ public class MarketSyncService(
         await SyncTrackedItemsAsync(stoppingToken);
         await ValidateTrackedItemsAsync(stoppingToken);
         await TakeSnapshotAsync(stoppingToken);
+        await EvaluatePredictionsAsync(stoppingToken);
+        await LogPredictionsAsync(stoppingToken);
         await CompactSnapshotsAsync(stoppingToken);
 
         var reconnectDelay = InitialReconnectDelay;
@@ -51,6 +66,8 @@ public class MarketSyncService(
                 {
                     await Task.Delay(reconnectDelay, stoppingToken);
                     await TakeSnapshotAsync(stoppingToken);
+                    await EvaluatePredictionsAsync(stoppingToken);
+                    await LogPredictionsAsync(stoppingToken);
 
                     if (DateTime.UtcNow - lastCompaction > CompactionInterval)
                     {
@@ -103,6 +120,8 @@ public class MarketSyncService(
                 {
                     logger.LogInformation("Cache expired event received, taking snapshot");
                     await TakeSnapshotAsync(ct);
+                    await EvaluatePredictionsAsync(ct);
+                    await LogPredictionsAsync(ct);
                     lastSnapshot = DateTime.UtcNow;
                 }
             }
@@ -113,6 +132,8 @@ public class MarketSyncService(
                 {
                     logger.LogInformation("Fallback interval reached during WebSocket, taking snapshot");
                     await TakeSnapshotAsync(ct);
+                    await EvaluatePredictionsAsync(ct);
+                    await LogPredictionsAsync(ct);
                     lastSnapshot = DateTime.UtcNow;
                 }
 
@@ -123,6 +144,182 @@ public class MarketSyncService(
                     lastCompaction = DateTime.UtcNow;
                 }
             }
+        }
+    }
+
+    private async Task LogPredictionsAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var velocityCalc = new VelocityCalculator(db);
+
+            var items = await db.TrackedItems.ToListAsync(ct);
+            if (items.Count == 0) return;
+
+            var now = DateTime.UtcNow;
+
+            // Check which (item, window) pairs already have a pending prediction
+            var pendingKeys = await db.VelocityPredictions
+                .Where(p => p.EvaluatedAt == null)
+                .Select(p => new { p.ItemId, p.Window })
+                .ToListAsync(ct);
+            var pendingSet = pendingKeys.ToHashSet();
+
+            var predictions = new List<VelocityPrediction>();
+
+            foreach (var (window, horizon) in EvaluationHorizons)
+            {
+                // Get dashboard data for this window (reuses VelocityCalculator without correction — raw predictions)
+                var dashboard = await velocityCalc.GetDashboardAsync(window, ct);
+
+                foreach (var item in dashboard)
+                {
+                    // Skip if already have a pending prediction or low confidence
+                    if (pendingSet.Contains(new { ItemId = item.ItemId, Window = window }))
+                        continue;
+                    if (item.Confidence == "low")
+                        continue;
+
+                    predictions.Add(new VelocityPrediction
+                    {
+                        ItemId = item.ItemId,
+                        Window = window,
+                        PredictedAt = now,
+                        PredictedSalesPerHour = item.RawSalesPerHour,
+                        PredictedPreorders = item.TotalPreorders,
+                        EvaluationDueAt = now + horizon,
+                    });
+                }
+            }
+
+            if (predictions.Count > 0)
+            {
+                db.VelocityPredictions.AddRange(predictions);
+                await db.SaveChangesAsync(ct);
+                logger.LogInformation("Logged {Count} velocity predictions", predictions.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to log predictions");
+        }
+    }
+
+    private async Task EvaluatePredictionsAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var now = DateTime.UtcNow;
+            var pending = await db.VelocityPredictions
+                .Where(p => p.EvaluatedAt == null && p.EvaluationDueAt <= now)
+                .ToListAsync(ct);
+
+            if (pending.Count == 0) return;
+
+            logger.LogInformation("Evaluating {Count} pending predictions", pending.Count);
+            var evaluated = 0;
+
+            foreach (var prediction in pending)
+            {
+                // Get snapshots between prediction time and evaluation due time
+                var snapshots = await db.TradeSnapshots
+                    .Where(s => s.ItemId == prediction.ItemId
+                             && s.RecordedAt >= prediction.PredictedAt
+                             && s.RecordedAt <= prediction.EvaluationDueAt)
+                    .OrderBy(s => s.RecordedAt)
+                    .ToListAsync(ct);
+
+                if (snapshots.Count < 2)
+                {
+                    // Not enough data to evaluate — extend deadline by the horizon
+                    var window = prediction.Window;
+                    if (EvaluationHorizons.TryGetValue(window, out var horizon))
+                        prediction.EvaluationDueAt = now + horizon;
+                    continue;
+                }
+
+                var first = snapshots.First();
+                var last = snapshots.Last();
+                var hours = (last.RecordedAt - first.RecordedAt).TotalHours;
+
+                if (hours <= 0) continue;
+
+                var actualSales = last.TotalTrades - first.TotalTrades;
+                if (actualSales < 0) actualSales = 0;
+
+                var actualSalesPerHour = (double)actualSales / hours;
+
+                prediction.ActualSalesPerHour = actualSalesPerHour;
+                prediction.ActualPreorders = last.TotalPreorders;
+                prediction.EvaluatedAt = now;
+
+                // Compute accuracy ratio
+                if (prediction.PredictedSalesPerHour > 0)
+                {
+                    prediction.AccuracyRatio = actualSalesPerHour / prediction.PredictedSalesPerHour;
+                }
+                else if (actualSalesPerHour == 0)
+                {
+                    prediction.AccuracyRatio = 1.0; // Both zero — correct
+                }
+                else
+                {
+                    prediction.AccuracyRatio = 2.0; // Predicted zero but sales happened — cap
+                }
+
+                // Clamp to prevent extreme outliers
+                prediction.AccuracyRatio = Math.Clamp(prediction.AccuracyRatio.Value, 0.1, 3.0);
+
+                // Update correction factor via EMA
+                await UpdateCorrectionFactorAsync(db, prediction.ItemId, prediction.Window, prediction.AccuracyRatio.Value, ct);
+                evaluated++;
+            }
+
+            await db.SaveChangesAsync(ct);
+
+            if (evaluated > 0)
+            {
+                // Invalidate cache so VelocityCalculator picks up new factors
+                var correctionProvider = scope.ServiceProvider.GetService<ICorrectionFactorProvider>();
+                correctionProvider?.InvalidateCache();
+
+                logger.LogInformation("Evaluated {Count} predictions, updated correction factors", evaluated);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to evaluate predictions");
+        }
+    }
+
+    private static async Task UpdateCorrectionFactorAsync(AppDbContext db, int itemId, string window, double accuracyRatio, CancellationToken ct)
+    {
+        var existing = await db.CorrectionFactors
+            .FirstOrDefaultAsync(f => f.ItemId == itemId && f.Window == window, ct);
+
+        if (existing == null)
+        {
+            db.CorrectionFactors.Add(new CorrectionFactor
+            {
+                ItemId = itemId,
+                Window = window,
+                Factor = Math.Clamp(accuracyRatio, 0.2, 3.0),
+                SampleCount = 1,
+                LastUpdated = DateTime.UtcNow,
+            });
+        }
+        else
+        {
+            var alpha = existing.SampleCount < WarmupSamples ? EmaAlphaWarmup : EmaAlpha;
+            existing.Factor = existing.Factor * (1 - alpha) + accuracyRatio * alpha;
+            existing.Factor = Math.Clamp(existing.Factor, 0.2, 3.0);
+            existing.SampleCount++;
+            existing.LastUpdated = DateTime.UtcNow;
         }
     }
 
@@ -257,53 +454,67 @@ public class MarketSyncService(
             if (oldSnapshots.Count == 0)
             {
                 logger.LogInformation("No snapshots older than {Days} days to compact", RetentionPeriod.TotalDays);
-                return;
             }
-
-            logger.LogInformation("Compacting {Count} snapshots older than {Cutoff:u}", oldSnapshots.Count, cutoff);
-
-            // Group by item and date, aggregate into daily summaries
-            var groups = oldSnapshots
-                .GroupBy(s => new { s.ItemId, Date = DateOnly.FromDateTime(s.RecordedAt) });
-
-            var summaries = new List<DailySummary>();
-            foreach (var group in groups)
+            else
             {
-                var sorted = group.OrderBy(s => s.RecordedAt).ToList();
-                var salesCount = sorted.Last().TotalTrades - sorted.First().TotalTrades;
-                if (salesCount < 0) salesCount = 0;
+                logger.LogInformation("Compacting {Count} snapshots older than {Cutoff:u}", oldSnapshots.Count, cutoff);
 
-                summaries.Add(new DailySummary
+                // Group by item and date, aggregate into daily summaries
+                var groups = oldSnapshots
+                    .GroupBy(s => new { s.ItemId, Date = DateOnly.FromDateTime(s.RecordedAt) });
+
+                var summaries = new List<DailySummary>();
+                foreach (var group in groups)
                 {
-                    ItemId = group.Key.ItemId,
-                    Date = group.Key.Date,
-                    SalesCount = salesCount,
-                    AvgBasePrice = (long)sorted.Average(s => s.BasePrice),
-                    AvgPreorders = (long)sorted.Average(s => s.TotalPreorders),
-                    SnapshotCount = sorted.Count,
-                });
+                    var sorted = group.OrderBy(s => s.RecordedAt).ToList();
+                    var salesCount = sorted.Last().TotalTrades - sorted.First().TotalTrades;
+                    if (salesCount < 0) salesCount = 0;
+
+                    summaries.Add(new DailySummary
+                    {
+                        ItemId = group.Key.ItemId,
+                        Date = group.Key.Date,
+                        SalesCount = salesCount,
+                        AvgBasePrice = (long)sorted.Average(s => s.BasePrice),
+                        AvgPreorders = (long)sorted.Average(s => s.TotalPreorders),
+                        SnapshotCount = sorted.Count,
+                    });
+                }
+
+                // Upsert: skip dates that already have a summary
+                var existingKeys = await db.DailySummaries
+                    .Where(d => d.Date < DateOnly.FromDateTime(cutoff))
+                    .Select(d => new { d.ItemId, d.Date })
+                    .ToListAsync(ct);
+                var existingSet = existingKeys.ToHashSet();
+
+                var newSummaries = summaries
+                    .Where(s => !existingSet.Contains(new { s.ItemId, s.Date }))
+                    .ToList();
+
+                if (newSummaries.Count > 0)
+                    db.DailySummaries.AddRange(newSummaries);
+
+                db.TradeSnapshots.RemoveRange(oldSnapshots);
+                await db.SaveChangesAsync(ct);
+
+                logger.LogInformation(
+                    "Compaction complete: {Deleted} snapshots removed, {Created} daily summaries created",
+                    oldSnapshots.Count, newSummaries.Count);
             }
 
-            // Upsert: skip dates that already have a summary
-            var existingKeys = await db.DailySummaries
-                .Where(d => d.Date < DateOnly.FromDateTime(cutoff))
-                .Select(d => new { d.ItemId, d.Date })
+            // Clean up old evaluated predictions
+            var predictionCutoff = DateTime.UtcNow - PredictionRetention;
+            var oldPredictions = await db.VelocityPredictions
+                .Where(p => p.EvaluatedAt != null && p.EvaluatedAt < predictionCutoff)
                 .ToListAsync(ct);
-            var existingSet = existingKeys.ToHashSet();
 
-            var newSummaries = summaries
-                .Where(s => !existingSet.Contains(new { s.ItemId, s.Date }))
-                .ToList();
-
-            if (newSummaries.Count > 0)
-                db.DailySummaries.AddRange(newSummaries);
-
-            db.TradeSnapshots.RemoveRange(oldSnapshots);
-            await db.SaveChangesAsync(ct);
-
-            logger.LogInformation(
-                "Compaction complete: {Deleted} snapshots removed, {Created} daily summaries created",
-                oldSnapshots.Count, newSummaries.Count);
+            if (oldPredictions.Count > 0)
+            {
+                db.VelocityPredictions.RemoveRange(oldPredictions);
+                await db.SaveChangesAsync(ct);
+                logger.LogInformation("Cleaned up {Count} old evaluated predictions", oldPredictions.Count);
+            }
         }
         catch (Exception ex)
         {

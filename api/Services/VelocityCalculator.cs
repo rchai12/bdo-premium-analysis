@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace BdoMarketTracker.Services;
 
-public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
+public class VelocityCalculator(AppDbContext db, ICorrectionFactorProvider? correctionProvider = null) : IVelocityCalculator
 {
     public static readonly Dictionary<string, TimeSpan> WindowDefinitions = new()
     {
@@ -28,6 +28,11 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
         var dto = new VelocityDto { ItemId = itemId, Name = item.Name };
         var now = DateTime.UtcNow;
 
+        // Load correction factors if provider is available
+        var factors = correctionProvider != null
+            ? await correctionProvider.GetFactorsAsync([itemId], ct)
+            : null;
+
         // Single query: fetch all snapshots within the largest window (14d)
         var maxCutoff = now - WindowDefinitions.Values.Max();
         var allSnapshots = await db.TradeSnapshots
@@ -47,6 +52,7 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
                     Window = windowName,
                     SalesCount = 0,
                     SalesPerHour = 0,
+                    RawSalesPerHour = 0,
                     AvgPreorders = snapshots.FirstOrDefault()?.TotalPreorders ?? 0,
                     Confidence = "low"
                 });
@@ -56,7 +62,9 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
             var halfLifeHours = duration.TotalHours / 2;
             var (segments, totalSalesCount) = AnalyzeSegments(snapshots, now, halfLifeHours);
 
-            var salesPerHour = WeightedMean(segments);
+            var rawSalesPerHour = WeightedMean(segments);
+            var factor = factors?.GetValueOrDefault((itemId, windowName), 1.0) ?? 1.0;
+            var salesPerHour = rawSalesPerHour * factor;
             var avgPreorders = snapshots.Average(s => (double)s.TotalPreorders);
             var salesCount = snapshots.Last().TotalTrades - snapshots.First().TotalTrades;
 
@@ -65,6 +73,8 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
                 Window = windowName,
                 SalesCount = salesCount,
                 SalesPerHour = Math.Round(salesPerHour, 2),
+                RawSalesPerHour = Math.Round(rawSalesPerHour, 2),
+                CorrectionFactor = Math.Round(factor, 4),
                 AvgPreorders = Math.Round(avgPreorders, 0),
                 Confidence = GetConfidence(segments.Count, totalSalesCount)
             });
@@ -104,23 +114,30 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
         var halfLifeHours = windowDuration.TotalHours / 2;
         var result = new List<DashboardItemDto>();
 
+        // Load correction factors if provider is available
+        var factors = correctionProvider != null
+            ? await correctionProvider.GetFactorsAsync(itemIds, ct)
+            : null;
+
         foreach (var item in items)
         {
             if (!latestSnapshots.TryGetValue(item.Id, out var latestSnapshot))
                 continue;
 
-            double salesPerHour = 0;
+            double rawSalesPerHour = 0;
             string confidence = "low";
             long salesCount = 0;
 
             if (snapshotsByItem.TryGetValue(item.Id, out var itemSnapshots) && itemSnapshots.Count >= 2)
             {
                 var (segments, totalSalesCount) = AnalyzeSegments(itemSnapshots, now, halfLifeHours);
-                salesPerHour = WeightedMean(segments);
+                rawSalesPerHour = WeightedMean(segments);
                 confidence = GetConfidence(segments.Count, totalSalesCount);
                 salesCount = itemSnapshots.Last().TotalTrades - itemSnapshots.First().TotalTrades;
             }
 
+            var factor = factors?.GetValueOrDefault((item.Id, window), 1.0) ?? 1.0;
+            var salesPerHour = rawSalesPerHour * factor;
             var totalPreorders = latestSnapshot.TotalPreorders;
             var fulfillmentScore = totalPreorders > 0 ? salesPerHour / totalPreorders : 0;
             var estimatedFillHours = salesPerHour > 0 ? totalPreorders / salesPerHour : double.MaxValue;
@@ -133,6 +150,8 @@ public class VelocityCalculator(AppDbContext db) : IVelocityCalculator
                 TotalPreorders = totalPreorders,
                 SalesCount = salesCount,
                 SalesPerHour = Math.Round(salesPerHour, 2),
+                RawSalesPerHour = Math.Round(rawSalesPerHour, 2),
+                CorrectionFactor = Math.Round(factor, 4),
                 Window = window,
                 FulfillmentScore = Math.Round(fulfillmentScore, 4),
                 EstimatedFillTime = FormatFillTime(estimatedFillHours),

@@ -42,15 +42,19 @@ bdo-market-tracker/
 │   ├── Models/
 │   │   ├── ApplicationUser.cs    # ASP.NET Core Identity user entity
 │   │   ├── ArshaModels.cs        # Arsha API response DTOs (ArshaDbItem, ArshaMarketItem, etc.)
+│   │   ├── CorrectionFactor.cs   # Per-item velocity calibration factor (EMA-updated)
 │   │   ├── DailySummary.cs       # Compacted daily aggregate (sales, avg price, avg preorders per item per day)
 │   │   ├── TrackedItem.cs        # Item entity (id, name, grade)
-│   │   └── TradeSnapshot.cs      # Snapshot entity (trades, stock, price, preorders, timestamp)
+│   │   ├── TradeSnapshot.cs      # Snapshot entity (trades, stock, price, preorders, timestamp)
+│   │   └── VelocityPrediction.cs # Prediction log for feedback loop evaluation
 │   ├── Services/
 │   │   ├── IArshaApiClient.cs    # Interface for Arsha HTTP client
 │   │   ├── ArshaApiClient.cs     # HttpClient wrapper for arsha.io endpoints (120s timeout, Polly retry)
+│   │   ├── ICorrectionFactorProvider.cs # Interface for correction factor loading
+│   │   ├── CorrectionFactorProvider.cs  # DB-backed correction factors with 5-min cache
 │   │   ├── IVelocityCalculator.cs # Interface for velocity calculator
-│   │   ├── VelocityCalculator.cs # Weighted mean velocity, day-of-week weighting, fulfillment calculations
-│   │   └── MarketSyncService.cs  # Background service: WebSocket + polling, item validation, snapshot compaction
+│   │   ├── VelocityCalculator.cs # Weighted mean velocity, day-of-week weighting, correction factor application
+│   │   └── MarketSyncService.cs  # Background service: WebSocket + polling, prediction logging/evaluation, compaction
 │   ├── Program.cs                # DI, Identity, JWT, CORS, Polly, rate limiting, health checks, auto-migrate, admin seed
 │   ├── Dockerfile                # Multi-stage .NET 9 build for Oracle Cloud VM
 │   ├── .dockerignore               # Docker build exclusions
@@ -143,15 +147,28 @@ On startup, `MarketSyncService`:
     - Monday & Friday: 1.3× (limit resets / payday)
     - Saturday: 1.2× (weekend activity)
     - Other days: 1.0×
-  - The **weighted mean** of segment rates becomes `salesPerHour`
+  - The **weighted mean** of segment rates becomes `rawSalesPerHour`
+  - A **correction factor** is applied: `salesPerHour = rawSalesPerHour × correctionFactor`
 - **Time windows:** 3h, 12h, 24h, 3d, 7d, 14d
 - **Confidence indicator:** "low" (<3 segments or <3 sales), "medium" (3–10 segments), "high" (>10 segments and ≥10 sales)
 - **Fulfillment score** = `sales_per_hour / total_preorders` (higher = faster fill)
 - **Estimated fill time** = `total_preorders / sales_per_hour`
 - **Query optimization:** Batch queries (3 total for dashboard, 2 for velocity) instead of N+1 per item
 
+### Adaptive Prediction Calibration
+The system learns from its own prediction accuracy and self-corrects over time:
+- **Prediction logging:** After each snapshot, logs the current `salesPerHour` prediction for each item (24h, 3d, 7d windows only, medium/high confidence)
+- **Evaluation:** After an evaluation horizon passes (6h for 24h window, 12h for 3d, 24h for 7d), compares predicted vs actual velocity from snapshot data
+- **Correction factors:** `accuracy_ratio = actual / predicted`, blended into a per-item correction factor via **exponential moving average** (EMA, alpha=0.15, warmup alpha=0.3 for first 10 samples)
+- **Application:** `VelocityCalculator` multiplies raw velocity by the correction factor; both `salesPerHour` (corrected) and `rawSalesPerHour` (uncorrected) are returned in API responses
+- **Cold start:** All factors default to 1.0 (no change); system converges within ~1 week
+- **Throttling:** Only one pending prediction per (item, window) at a time — caps storage at ~10 MB over 30 days
+- **Cleanup:** Evaluated predictions older than 30 days are deleted during daily compaction
+- **Clamping:** Correction factors clamped to [0.2, 3.0] to prevent runaway corrections; accuracy ratios clamped to [0.1, 3.0]
+- **Frontend:** Dashboard shows a "tune" icon with tooltip when correction is active; item detail shows raw vs calibrated columns and side-by-side chart bars
+
 ### Dashboard Columns
-`name`, `totalPreorders`, `salesCount` (trades in selected window), `salesPerHour`, `estimatedFillTime`, `fulfillmentScore`, `confidence`
+`name`, `totalPreorders`, `salesCount` (trades in selected window), `salesPerHour`, `rawSalesPerHour`, `correctionFactor`, `estimatedFillTime`, `fulfillmentScore`, `confidence`
 
 ### API Endpoints
 | Method | Path | Auth | Description |
@@ -184,7 +201,7 @@ npx ng serve                      # Runs on http://localhost:4200
 dotnet test api.Tests/
 ```
 
-Backend auto-migrates the database and seeds the admin user on startup. The background service startup sequence is: sync tracked items → validate against market API → take first snapshot → compact old snapshots → enter WebSocket loop. CORS is configured from `appsettings.json`.
+Backend auto-migrates the database and seeds the admin user on startup. The background service startup sequence is: sync tracked items → validate against market API → take first snapshot → evaluate pending predictions → log new predictions → compact old snapshots → enter WebSocket loop. CORS is configured from `appsettings.json`.
 
 Login at `http://localhost:4200` with the dev credentials above.
 
@@ -220,6 +237,15 @@ Configuration uses ASP.NET Core's layered approach: `appsettings.json` (base/pla
 **daily_summaries:** `id` (serial PK), `item_id` (FK), `date`, `sales_count`, `avg_base_price`, `avg_preorders`, `snapshot_count`
 - Unique index: `(item_id, date)`
 - Created by compaction of old snapshots — lightweight long-term historical data
+
+**velocity_predictions:** `id` (serial PK), `item_id` (FK), `window`, `predicted_at`, `predicted_sales_per_hour`, `predicted_preorders`, `evaluation_due_at`, `actual_sales_per_hour` (nullable), `actual_preorders` (nullable), `accuracy_ratio` (nullable), `evaluated_at` (nullable)
+- Index: `(evaluation_due_at) WHERE evaluated_at IS NULL` for pending evaluations
+- Index: `(item_id, window, predicted_at DESC)`
+- Evaluated predictions cleaned up after 30 days
+
+**correction_factors:** `id` (serial PK), `item_id` (FK), `window`, `factor` (default 1.0), `sample_count`, `last_updated`
+- Unique index: `(item_id, window)`
+- Max ~852 rows (284 items × 3 tracked windows)
 
 ## Deployment
 
@@ -287,6 +313,9 @@ Edit `MarketSyncService.RetentionPeriod` (currently 30 days). Must be ≥14 days
 
 ### Add a new time window
 Edit `VelocityCalculator.WindowDefinitions` dictionary — add entry like `["30d"] = TimeSpan.FromDays(30)`.
+
+### Tune calibration parameters
+Edit `MarketSyncService`: `EmaAlpha` (smoothing, default 0.15), `EmaAlphaWarmup` (first 10 samples, default 0.3), `EvaluationHorizons` (which windows to track and how long to wait before evaluating).
 
 ### Add a new API endpoint
 Add method to `ItemsController` (with `[Authorize]`), create DTO in `Dtos/` if needed.

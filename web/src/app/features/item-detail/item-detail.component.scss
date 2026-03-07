@@ -77,6 +77,19 @@ h2 {
   }
 }
 
+.calibration-badge {
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  background-color: #e3f2fd;
+  color: #1565c0;
+}
+
+.calibration-none {
+  color: #999;
+}
+
 .confidence-label {
   padding: 2px 8px;
   border-radius: 12px;

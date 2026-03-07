@@ -70,6 +70,8 @@
               <th>Window</th>
               <th>Sales Count</th>
               <th>Sales/Hr</th>
+              <th>Raw Sales/Hr</th>
+              <th>Calibration</th>
               <th>Avg Preorders</th>
               <th>Confidence</th>
             </tr>
@@ -80,6 +82,14 @@
                 <td>{{ w.window }}</td>
                 <td>{{ w.salesCount | number }}</td>
                 <td>{{ w.salesPerHour | number:'1.1-2' }}</td>
+                <td>{{ w.rawSalesPerHour | number:'1.1-2' }}</td>
+                <td>
+                  @if (w.correctionFactor !== 1) {
+                    <span class="calibration-badge">{{ w.correctionFactor | number:'1.2-2' }}x</span>
+                  } @else {
+                    <span class="calibration-none">--</span>
+                  }
+                </td>
                 <td>{{ w.avgPreorders | number:'1.0-0' }}</td>
                 <td>
                   <span class="confidence-label" [ngClass]="'confidence-' + w.confidence">
