@@ -84,7 +84,7 @@
                 <td>{{ w.salesPerHour | number:'1.1-2' }}</td>
                 <td>{{ w.rawSalesPerHour | number:'1.1-2' }}</td>
                 <td>
-                  @if (w.correctionFactor !== 1) {
+                  @if (w.correctionFactor && w.correctionFactor !== 1) {
                     <span class="calibration-badge">{{ w.correctionFactor | number:'1.2-2' }}x</span>
                   } @else {
                     <span class="calibration-none">--</span>

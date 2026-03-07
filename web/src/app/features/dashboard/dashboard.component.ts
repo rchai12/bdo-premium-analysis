@@ -131,13 +131,13 @@ export class DashboardComponent implements OnInit {
   }
 
   getCorrectionTooltip(item: DashboardItem): string {
-    if (item.correctionFactor === 1) return '';
+    if (!item.correctionFactor || item.correctionFactor === 1) return '';
     const pct = ((item.correctionFactor - 1) * 100).toFixed(0);
     const sign = item.correctionFactor > 1 ? '+' : '';
     return `Calibrated ${sign}${pct}% (raw: ${item.rawSalesPerHour}/hr)`;
   }
 
   hasCorrectionFactor(item: DashboardItem): boolean {
-    return item.correctionFactor !== 1 && item.correctionFactor !== 0;
+    return !!item.correctionFactor && item.correctionFactor !== 1;
   }
 }
