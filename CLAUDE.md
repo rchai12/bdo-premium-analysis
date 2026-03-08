@@ -9,7 +9,7 @@ A web app that tracks sales velocity of Black Desert Online (BDO) Central Market
 ## Architecture
 
 ```
-[Neon PostgreSQL] <-- EF Core --> [.NET 9 Web API :5000] <-- HTTP --> [Angular 18 SPA :4200]
+[PostgreSQL (Docker)] <-- EF Core --> [.NET 9 Web API :5000] <-- HTTP --> [Angular 18 SPA :4200]
                                          |                                    |
                                    Identity + JWT Auth              Auth Guard + Interceptor
                                    Polly Retry Policies             JWT Token Management
@@ -21,7 +21,7 @@ A web app that tracks sales velocity of Black Desert Online (BDO) Central Market
 
 - **Backend:** ASP.NET Core 9, Entity Framework Core, Npgsql, ASP.NET Core Identity, JWT Bearer Auth, Polly
 - **Frontend:** Angular 18 (standalone components), Angular Material, Chart.js/ng2-charts
-- **Database:** Neon (serverless PostgreSQL)
+- **Database:** PostgreSQL 16 (Docker container on Oracle Cloud VM)
 - **External API:** arsha.io v2 (30-minute cache TTL)
 - **Deployment:** Oracle Cloud VM (Docker) + Cloudflare Pages (SPA)
 
@@ -89,7 +89,7 @@ bdo-market-tracker/
 │       └── app.routes.ts         # Guarded routes: / -> dashboard, /item/:id -> detail, /login -> login
 │
 ├── deploy/                       # Docker Compose + Nginx reverse proxy
-│   ├── docker-compose.yml        # Nginx + bdo-api (+ future apps)
+│   ├── docker-compose.yml        # PostgreSQL + Nginx + bdo-api (+ future apps)
 │   ├── nginx/conf.d/default.conf # Domain-based routing rules
 │   ├── .env.example              # Template for production secrets
 │   └── .env                      # Real secrets (gitignored)
@@ -127,7 +127,7 @@ arsha.io caches BDO market data for **30 minutes**. The backend syncs in lockste
 ### Data Retention
 - **Raw snapshots** are kept for **30 days** (the velocity calculator's longest window is 14d)
 - **Daily compaction** runs on startup and once per day: aggregates old snapshots into `daily_summaries` (sales count, avg price, avg preorders per item per day) then deletes the raw rows
-- Keeps Neon free tier (512MB) usage sustainable (~120MB for 30 days of raw snapshots + negligible daily summaries)
+- Keeps database small (~200MB for 30 days of raw snapshots + negligible daily summaries)
 
 ### Tracked Items
 On startup, `MarketSyncService`:
@@ -157,7 +157,7 @@ On startup, `MarketSyncService`:
 
 ### Adaptive Prediction Calibration
 The system learns from its own prediction accuracy and self-corrects over time:
-- **Prediction logging:** After each snapshot, logs the current `salesPerHour` prediction for each item (24h, 3d, 7d windows only, medium/high confidence)
+- **Prediction logging:** Throttled to once per hour (not every snapshot), logs the current `salesPerHour` prediction for each item (24h, 3d, 7d windows only, medium/high confidence)
 - **Evaluation:** After an evaluation horizon passes (6h for 24h window, 12h for 3d, 24h for 7d), compares predicted vs actual velocity from snapshot data
 - **Correction factors:** `accuracy_ratio = actual / predicted`, blended into a per-item correction factor via **exponential moving average** (EMA, alpha=0.15, warmup alpha=0.3 for first 10 samples)
 - **Application:** `VelocityCalculator` multiplies raw velocity by the correction factor; both `salesPerHour` (corrected) and `rawSalesPerHour` (uncorrected) are returned in API responses
@@ -273,8 +273,8 @@ Internet :80/:443
 # On the Oracle Cloud VM (first time):
 docker network create proxy_net   # Shared network for cross-compose routing
 cd deploy
-cp .env.example .env              # Fill in real secrets
-docker compose up -d --build      # Build and start all services
+cp .env.example .env              # Fill in real secrets (including POSTGRES_PASSWORD)
+docker compose up -d --build      # Build and start PostgreSQL, API, and Nginx
 docker compose logs -f bdo-api    # Watch logs
 ```
 
@@ -283,6 +283,11 @@ To redeploy after code changes:
 cd deploy
 git pull
 docker compose up -d --build bdo-api
+```
+
+PostgreSQL data persists in the `bdo-pgdata` Docker volume. To inspect:
+```bash
+docker compose exec postgres psql -U bdo -d bdo_market
 ```
 
 ### Frontend
@@ -298,7 +303,7 @@ Cloudflare Pages. Root directory `web`, output `dist/web/browser`.
 
 ### API env vars
 Stored in `deploy/.env` (gitignored). See `deploy/.env.example` for the template:
-`ConnectionStrings__DefaultConnection`, `Jwt__Key`, `Admin__Email`, `Admin__Password`, `Cors__AllowedOrigins__0`
+`POSTGRES_PASSWORD`, `ConnectionStrings__DefaultConnection`, `Jwt__Key`, `Admin__Email`, `Admin__Password`, `Cors__AllowedOrigins__0`
 
 ## Common Tasks
 

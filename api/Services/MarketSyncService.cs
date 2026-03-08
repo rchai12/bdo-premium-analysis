@@ -22,6 +22,8 @@ public class MarketSyncService(
     private static readonly TimeSpan CompactionInterval = TimeSpan.FromHours(24);
     private static readonly TimeSpan PredictionRetention = TimeSpan.FromDays(30);
     private readonly string _region = config.GetValue("Arsha:Region", "na")!;
+    private static readonly TimeSpan PredictionLogInterval = TimeSpan.FromHours(1);
+    private DateTime _lastPredictionLog = DateTime.MinValue;
 
     private const double EmaAlpha = 0.15;
     private const double EmaAlphaWarmup = 0.3;
@@ -151,14 +153,16 @@ public class MarketSyncService(
     {
         try
         {
+            // Throttle: only log predictions once per hour to reduce query load
+            var now = DateTime.UtcNow;
+            if (now - _lastPredictionLog < PredictionLogInterval) return;
+
             using var scope = scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             var velocityCalc = new VelocityCalculator(db);
 
             var items = await db.TrackedItems.ToListAsync(ct);
             if (items.Count == 0) return;
-
-            var now = DateTime.UtcNow;
 
             // Check which (item, window) pairs already have a pending prediction
             var pendingKeys = await db.VelocityPredictions
@@ -200,6 +204,8 @@ public class MarketSyncService(
                 await db.SaveChangesAsync(ct);
                 logger.LogInformation("Logged {Count} velocity predictions", predictions.Count);
             }
+
+            _lastPredictionLog = now;
         }
         catch (Exception ex)
         {
@@ -445,76 +451,97 @@ public class MarketSyncService(
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
             var cutoff = DateTime.UtcNow - RetentionPeriod;
-            var oldSnapshots = await db.TradeSnapshots
+
+            // Get distinct dates that need compaction (lightweight query)
+            var oldDates = await db.TradeSnapshots
                 .Where(s => s.RecordedAt < cutoff)
-                .OrderBy(s => s.ItemId)
-                .ThenBy(s => s.RecordedAt)
+                .Select(s => s.RecordedAt.Date)
+                .Distinct()
                 .ToListAsync(ct);
 
-            if (oldSnapshots.Count == 0)
+            if (oldDates.Count == 0)
             {
                 logger.LogInformation("No snapshots older than {Days} days to compact", RetentionPeriod.TotalDays);
             }
             else
             {
-                logger.LogInformation("Compacting {Count} snapshots older than {Cutoff:u}", oldSnapshots.Count, cutoff);
+                logger.LogInformation("Compacting snapshots from {Count} days older than {Cutoff:u}", oldDates.Count, cutoff);
 
-                // Group by item and date, aggregate into daily summaries
-                var groups = oldSnapshots
-                    .GroupBy(s => new { s.ItemId, Date = DateOnly.FromDateTime(s.RecordedAt) });
-
-                var summaries = new List<DailySummary>();
-                foreach (var group in groups)
-                {
-                    var sorted = group.OrderBy(s => s.RecordedAt).ToList();
-                    var salesCount = sorted.Last().TotalTrades - sorted.First().TotalTrades;
-                    if (salesCount < 0) salesCount = 0;
-
-                    summaries.Add(new DailySummary
-                    {
-                        ItemId = group.Key.ItemId,
-                        Date = group.Key.Date,
-                        SalesCount = salesCount,
-                        AvgBasePrice = (long)sorted.Average(s => s.BasePrice),
-                        AvgPreorders = (long)sorted.Average(s => s.TotalPreorders),
-                        SnapshotCount = sorted.Count,
-                    });
-                }
-
-                // Upsert: skip dates that already have a summary
+                // Existing summaries to skip
                 var existingKeys = await db.DailySummaries
                     .Where(d => d.Date < DateOnly.FromDateTime(cutoff))
                     .Select(d => new { d.ItemId, d.Date })
                     .ToListAsync(ct);
                 var existingSet = existingKeys.ToHashSet();
 
-                var newSummaries = summaries
-                    .Where(s => !existingSet.Contains(new { s.ItemId, s.Date }))
-                    .ToList();
+                var totalDeleted = 0;
+                var totalCreated = 0;
 
-                if (newSummaries.Count > 0)
-                    db.DailySummaries.AddRange(newSummaries);
+                // Process one day at a time to avoid loading all old snapshots into memory
+                foreach (var date in oldDates.Order())
+                {
+                    var dayStart = date;
+                    var dayEnd = date.AddDays(1);
 
-                db.TradeSnapshots.RemoveRange(oldSnapshots);
-                await db.SaveChangesAsync(ct);
+                    var daySnapshots = await db.TradeSnapshots
+                        .Where(s => s.RecordedAt >= dayStart && s.RecordedAt < dayEnd && s.RecordedAt < cutoff)
+                        .OrderBy(s => s.ItemId)
+                        .ThenBy(s => s.RecordedAt)
+                        .ToListAsync(ct);
+
+                    if (daySnapshots.Count == 0) continue;
+
+                    // Aggregate into daily summaries per item
+                    var groups = daySnapshots.GroupBy(s => s.ItemId);
+                    var newSummaries = new List<DailySummary>();
+
+                    foreach (var group in groups)
+                    {
+                        var dateOnly = DateOnly.FromDateTime(date);
+                        if (existingSet.Contains(new { ItemId = group.Key, Date = dateOnly }))
+                            continue;
+
+                        var sorted = group.OrderBy(s => s.RecordedAt).ToList();
+                        var salesCount = sorted.Last().TotalTrades - sorted.First().TotalTrades;
+                        if (salesCount < 0) salesCount = 0;
+
+                        newSummaries.Add(new DailySummary
+                        {
+                            ItemId = group.Key,
+                            Date = dateOnly,
+                            SalesCount = salesCount,
+                            AvgBasePrice = (long)sorted.Average(s => s.BasePrice),
+                            AvgPreorders = (long)sorted.Average(s => s.TotalPreorders),
+                            SnapshotCount = sorted.Count,
+                        });
+                    }
+
+                    if (newSummaries.Count > 0)
+                        db.DailySummaries.AddRange(newSummaries);
+
+                    // Bulk delete this day's snapshots without loading entities
+                    await db.TradeSnapshots
+                        .Where(s => s.RecordedAt >= dayStart && s.RecordedAt < dayEnd && s.RecordedAt < cutoff)
+                        .ExecuteDeleteAsync(ct);
+
+                    await db.SaveChangesAsync(ct);
+                    totalDeleted += daySnapshots.Count;
+                    totalCreated += newSummaries.Count;
+                }
 
                 logger.LogInformation(
                     "Compaction complete: {Deleted} snapshots removed, {Created} daily summaries created",
-                    oldSnapshots.Count, newSummaries.Count);
+                    totalDeleted, totalCreated);
             }
 
-            // Clean up old evaluated predictions
+            // Bulk delete old evaluated predictions
             var predictionCutoff = DateTime.UtcNow - PredictionRetention;
-            var oldPredictions = await db.VelocityPredictions
+            var deleted = await db.VelocityPredictions
                 .Where(p => p.EvaluatedAt != null && p.EvaluatedAt < predictionCutoff)
-                .ToListAsync(ct);
+                .ExecuteDeleteAsync(ct);
 
-            if (oldPredictions.Count > 0)
-            {
-                db.VelocityPredictions.RemoveRange(oldPredictions);
-                await db.SaveChangesAsync(ct);
-                logger.LogInformation("Cleaned up {Count} old evaluated predictions", oldPredictions.Count);
-            }
+            if (deleted > 0)
+                logger.LogInformation("Cleaned up {Count} old evaluated predictions", deleted);
         }
         catch (Exception ex)
         {
